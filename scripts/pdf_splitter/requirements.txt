@@ -1,0 +1,5 @@
+# Dependencies for the PDF splitter only.
+# Deliberately separate from backend/requirements.txt: the FastAPI app does
+# not need these, and this tool does not need the app.
+pypdf==5.1.0
+openpyxl==3.1.5

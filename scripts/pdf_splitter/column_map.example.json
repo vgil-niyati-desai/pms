@@ -1,0 +1,10 @@
+{
+  "_comment": "Copy to column_map.json and edit. Keys are the exact header text in the spreadsheet; values are the canonical field names the splitter understands. Use this when a header is too unusual to be recognised automatically, or when the tool reports two columns mapping to the same field.",
+  "Pg From": "start_page",
+  "Pg To": "end_page",
+  "Name of Client / Employer": "client_name",
+  "Nature of Document": "document_type",
+  "Letter Ref.": "reference_number",
+  "Name of Work": "project_title",
+  "Dated": "document_date"
+}

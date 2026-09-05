@@ -1,0 +1,29 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+python-dotenv==1.0.1
+python-multipart==0.0.9
+
+# MongoDB. pymongo bundles the bson package used for
+# ObjectId; there is no separate install for it.
+pymongo==4.10.1
+
+# Manual redaction. MuPDF is what actually deletes the covered text from a
+# PDF's content stream, rather than drawing a box over it, and it renders the
+# page images the selection UI draws on. Imported lazily in app/redaction.py,
+# so an install without it still starts -- only the redaction endpoints fail,
+# with a message saying to install this.
+#
+# NOTE: PyMuPDF is AGPL-3.0 (a commercial licence is sold separately). Fine
+# for in-house use; revisit before shipping the PMS to anyone outside.
+pymupdf==1.28.2
+
+# Transitive dependencies, pinned only so a rebuilt venv matches the one the
+# app was verified against. Nothing here is imported directly: anyio arrives
+# with starlette (and httpx), click and websockets with uvicorn[standard].
+# Left unpinned, a fresh install picks up whatever is current on PyPI, which
+# is how a rebuild after the project rename silently moved all three. Raise
+# them deliberately, with the verify_*.py suites as the check.
+anyio==4.14.2
+click==8.4.2
+websockets==17.0.1

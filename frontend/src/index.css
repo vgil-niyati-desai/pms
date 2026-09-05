@@ -1,0 +1,2116 @@
+/* ======================================================================
+   Procurement Management System — visual system
+
+   Organised by what it styles, rather than by when it was written. Three
+   rules run through the whole sheet:
+
+   1. Nothing escapes its container. Every grid and flex child that holds
+      text carries `min-width: 0`, because the default `auto` refuses to
+      shrink below its content and pushes the layout wider than the page.
+      Long unbroken strings — file names, reference numbers, emails —
+      break rather than overflow.
+   2. Wide content scrolls inside its own box. Tables and the tab strip
+      get their own horizontal scroll; the page never scrolls sideways.
+   3. Every colour, radius, shadow and measure comes from a token in
+      `:root`. Retuning the look means editing that block, not hunting
+      through the sheet.
+   ====================================================================== */
+
+:root {
+  /* ---- ink -------------------------------------------------------- */
+  --ink: #151B28;
+  --ink-soft: #5C6779;
+  --ink-faint: #8E97A8;
+
+  /* ---- surfaces and lines ----------------------------------------- */
+  --paper: #F5F7FA;      /* app canvas */
+  --paper-2: #F8FAFC;    /* table heads and other quiet fills */
+  --card: #FFFFFF;
+  --line: #E2E7EF;
+  --line-soft: #EEF1F6;
+
+  /* ---- accent ----------------------------------------------------- */
+  --accent: #2B4ACB;
+  --accent-dark: #1E38A3;
+  --accent-soft: #EDF1FE;
+  --accent-line: #CFDAFB;
+  --accent-ring: rgba(43, 74, 203, 0.16);
+
+  /* ---- status ----------------------------------------------------- */
+  --good: #12805C;
+  --good-soft: #E6F6EF;
+  --warn: #C2410C;
+  --warn-soft: #FDF0E7;
+  --warn-line: #F3D6C3;
+  --amber: #92610A;
+  --amber-soft: #FBF3E3;
+  --plum: #6D3BC4;
+  --plum-soft: #F3EDFD;
+  --teal: #0F766E;
+  --teal-soft: #E4F3F1;
+
+  /* ---- navigation (dark sidebar) ---------------------------------- */
+  --nav-bg: #141A26;
+  --nav-ink: #A5AFC1;
+  --nav-ink-strong: #FFFFFF;
+
+  /* ---- geometry --------------------------------------------------- */
+  --radius: 14px;
+  --radius-lg: 18px;
+  --radius-sm: 10px;
+  --radius-xs: 8px;
+  --radius-pill: 999px;
+
+  /* ---- elevation -------------------------------------------------- */
+  --shadow-btn: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.03);
+  --shadow-md: 0 4px 12px -2px rgba(16, 24, 40, 0.08), 0 2px 6px -3px rgba(16, 24, 40, 0.06);
+  --shadow-raised: 0 24px 48px -12px rgba(16, 24, 40, 0.26);
+  --shadow-panel: -24px 0 64px -16px rgba(16, 24, 40, 0.24);
+
+  /* ---- layout ----------------------------------------------------- */
+  --sidebar-width: 232px;
+  --content-max: 1220px;
+  --form-max: 900px;
+  --topbar-h: 60px;
+
+  /* ---- motion ----------------------------------------------------- */
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --fast: 130ms;
+}
+
+/* ---- base ------------------------------------------------------------ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  /* The shell fills the viewport and scrolls inside itself, so the page
+     behind it never scrolls; anything wider scrolls in its own box. */
+  max-width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    "Helvetica Neue", Arial, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  /* Headings hold record titles, which can be long and unbroken. */
+  overflow-wrap: anywhere;
+  letter-spacing: -0.012em;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+h2 {
+  font-size: 17px;
+  margin: 0 0 16px 0;
+  line-height: 1.35;
+}
+h3 {
+  font-size: 15px;
+  margin: 0 0 12px 0;
+}
+/* h4 heads the groups inside a tab — a quiet section rule, not a title. */
+h4 {
+  font-size: 12px;
+  margin: 0 0 10px 0;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+  font-weight: 650;
+}
+
+a {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+  text-decoration: none;
+  font-weight: 550;
+  transition: color var(--fast) var(--ease);
+}
+a:hover {
+  color: var(--accent-dark);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+img {
+  max-width: 100%;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Thin, quiet scrollbars — the filter rail and the tables scroll often. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #CBD3E0 transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: #CBD3E0;
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--radius-pill);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #A9B4C6;
+  background-clip: content-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---- text utilities -------------------------------------------------- */
+
+.muted {
+  color: var(--ink-soft);
+}
+.hint {
+  font-size: 12.5px;
+  margin: 7px 0 0 0;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+.prose {
+  font-size: 14px;
+  margin: 0 0 14px 0;
+  color: var(--ink-soft);
+  line-height: 1.65;
+  /* Keeps the line breaks people type, without letting a long unbroken
+     string push the card wider than the page. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.prose:last-child {
+  margin-bottom: 0;
+}
+.page-note {
+  margin: 0 0 18px 0;
+  font-size: 13.5px;
+}
+.page-note a {
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+.page-note a:hover {
+  color: var(--accent);
+  text-decoration: none;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- application shell ----------------------------------------------- */
+
+/* The frame fills the viewport and never scrolls itself. That is what keeps
+   the sidebar and the topbar in place: the only thing that moves is the main
+   column, which scrolls inside its own box. */
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 1fr;
+  height: 100vh;
+  /* Mobile browsers shrink the visible area as their chrome retracts; dvh
+     tracks that, vh does not. Kept second so it is simply ignored where
+     dvh is unsupported. */
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.sidebar {
+  background: var(--nav-bg);
+  color: #fff;
+  padding: 20px 14px;
+  /* It fills the frame's full height and stays there: the page scroll
+     happens in .shell-main, which the sidebar is not part of. */
+  height: 100%;
+  /* A long nav scrolls inside the sidebar rather than being cut off. */
+  overflow-y: auto;
+  scrollbar-color: #39414F transparent;
+}
+.sidebar .brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  font-weight: 650;
+  font-size: 14.5px;
+  letter-spacing: -0.01em;
+  color: #fff;
+  padding: 4px 8px 22px 8px;
+  overflow-wrap: anywhere;
+}
+/* Product mark, drawn rather than shipped as an asset. */
+.sidebar .brand::before {
+  content: "PM";
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-xs);
+  background: linear-gradient(140deg, #3A5CE0, #2B4ACB 60%, #1E38A3);
+  box-shadow: 0 2px 8px rgba(43, 74, 203, 0.4);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #fff;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nav-link {
+  display: block;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  color: var(--nav-ink);
+  text-decoration: none;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+.nav-link:hover {
+  color: var(--nav-ink-strong);
+  background: rgba(255, 255, 255, 0.07);
+  text-decoration: none;
+}
+.nav-link-active,
+.nav-link-active:hover {
+  color: var(--nav-ink-strong);
+  background: rgba(255, 255, 255, 0.11);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+/* min-width:0 lets the main column shrink; without it a wide table would
+   stretch the grid and push the whole page sideways.
+
+   This is the one box that scrolls. The topbar sticks to its top edge and
+   the routed content passes underneath, so the header stays put without
+   being taken out of the flow — which is what keeps it from covering the
+   first table row. */
+.shell-main {
+  min-width: 0;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: var(--topbar-h);
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: saturate(180%) blur(10px);
+  -webkit-backdrop-filter: saturate(180%) blur(10px);
+  border-bottom: 1px solid var(--line-soft);
+  padding: 11px 32px;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.topbar-title {
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  /* One line, trimmed — the topbar must not grow to fit a section name. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.topbar .btn {
+  flex-shrink: 0;
+}
+.nav-toggle {
+  display: none;
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  border-radius: var(--radius-sm);
+  font-size: 15px;
+  line-height: 1;
+  padding: 9px 12px;
+  cursor: pointer;
+  box-shadow: var(--shadow-btn);
+  transition: background var(--fast) var(--ease);
+}
+.nav-toggle:hover {
+  background: var(--paper);
+}
+
+.content {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 28px 32px 56px 32px;
+  min-width: 0;
+}
+
+/* ---- cards ----------------------------------------------------------- */
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 22px 24px;
+  margin-bottom: 18px;
+  min-width: 0;
+}
+.card:last-child {
+  margin-bottom: 0;
+}
+/* Forms stay a readable width even when the page is wide. */
+.card.form {
+  max-width: var(--form-max);
+}
+
+/* ---- alerts ---------------------------------------------------------- */
+
+/* A tinted band with a solid rule down the leading edge, so the severity
+   reads before the sentence does. */
+.alert {
+  padding: 11px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  border-left-width: 3px;
+  margin-bottom: 16px;
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.alert-success {
+  background: var(--good-soft);
+  border-color: #C6E7D8;
+  border-left-color: var(--good);
+  color: #0C6247;
+}
+.alert-error {
+  background: var(--warn-soft);
+  border-color: var(--warn-line);
+  border-left-color: var(--warn);
+  color: #97330A;
+}
+
+/* ---- forms ----------------------------------------------------------- */
+
+label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -0.005em;
+  margin-bottom: 6px;
+  overflow-wrap: anywhere;
+}
+
+/* Every text-like control, including the number and email inputs the later
+   screens use — a type left out of this list renders unstyled. */
+input[type="text"],
+input[type="number"],
+input[type="date"],
+input[type="email"],
+input[type="tel"],
+input[type="search"],
+select,
+textarea {
+  width: 100%;
+  max-width: 100%;
+  padding: 10px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-family: inherit;
+  background: #fff;
+  color: var(--ink);
+  box-shadow: var(--shadow-btn);
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+}
+::placeholder {
+  color: var(--ink-faint);
+}
+input:hover:not(:disabled):not(:focus),
+select:hover:not(:disabled):not(:focus),
+textarea:hover:not(:disabled):not(:focus) {
+  border-color: #C9D2E0;
+}
+/* The ring replaces the default outline: same job, matched to the radius. */
+input:focus,
+select:focus,
+textarea:focus {
+  outline: 2px solid transparent; /* keeps a visible ring in forced-colours mode */
+  outline-offset: 0;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+input:disabled,
+select:disabled,
+textarea:disabled {
+  background: var(--paper-2);
+  color: var(--ink-faint);
+  cursor: not-allowed;
+}
+textarea {
+  resize: vertical;
+  min-height: 84px;
+  line-height: 1.6;
+}
+
+/* The native arrow is replaced so the control matches the text inputs. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 38px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%235C6779' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}
+
+input[type="file"] {
+  width: 100%;
+  max-width: 100%;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--ink-soft);
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--paper-2);
+  transition: border-color var(--fast) var(--ease), background var(--fast) var(--ease);
+}
+input[type="file"]:hover {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+input[type="file"]::file-selector-button {
+  margin-right: 12px;
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: #fff;
+  color: var(--ink);
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow-btn);
+}
+input[type="file"]::file-selector-button:hover {
+  background: var(--paper);
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 20px;
+}
+/* Grid children default to min-width:auto and refuse to shrink; without this
+   a long value in one column widens the whole row. */
+.form-row > * {
+  min-width: 0;
+}
+.field {
+  margin-bottom: 16px;
+  min-width: 0;
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line-soft);
+}
+.form-actions-end {
+  margin-left: auto;
+}
+/* Inside a dialog the actions are already the last thing in a short box, so
+   the rule above them would only add noise. */
+.modal .form-actions {
+  margin-top: 16px;
+  padding-top: 0;
+  border-top: none;
+}
+
+/* ---- buttons --------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  font-size: 13.5px;
+  font-family: inherit;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  line-height: 1.45;
+  text-decoration: none;
+  text-align: center;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: var(--shadow-btn);
+  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease),
+    box-shadow var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.btn:hover:enabled,
+a.btn:hover {
+  background: var(--paper-2);
+  border-color: #C9D2E0;
+  color: var(--ink);
+  text-decoration: none;
+}
+.btn:active:enabled,
+a.btn:active {
+  transform: translateY(1px);
+  box-shadow: none;
+}
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(30, 56, 163, 0.24), 0 2px 6px -2px rgba(30, 56, 163, 0.28);
+}
+.btn-primary:hover:enabled,
+a.btn-primary:hover {
+  background: var(--accent-dark);
+  border-color: var(--accent-dark);
+  color: #fff;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 12.5px;
+  border-radius: var(--radius-xs);
+}
+.btn-danger {
+  background: var(--warn-soft);
+  border-color: var(--warn-line);
+  color: var(--warn);
+  box-shadow: none;
+}
+.btn-danger:hover:enabled {
+  background: #F9E2D3;
+  border-color: #E8BEA3;
+  color: #9C340B;
+}
+
+/* ---- tables ---------------------------------------------------------- */
+
+/* The table keeps its natural column widths and scrolls inside this box,
+   rather than squeezing columns into illegibility or widening the page.
+   The box is also what gives the table its outline and rounded corners —
+   `overflow-x` clips the header fill to the radius. */
+.table-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  /* A containing block for the absolutely-positioned bits inside the cells —
+     the screen-reader-only labels in the evidence pills. Without it they are
+     laid out against the viewport, so a cell far along a scrolled-away table
+     puts one hundreds of pixels off the right of the page and drags the
+     document's scrollable width out with it. */
+  position: relative;
+}
+
+table {
+  width: 100%;
+  /* A floor, not a target: below this the list columns starve each other and
+     the box above scrolls instead. Kept under the width a list table gets on
+     a desktop, so scrolling is what narrow screens do, not the default. */
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  line-height: 1.5;
+  /* Figures line up column-wise: values, dates, reference numbers. */
+  font-variant-numeric: tabular-nums;
+}
+th {
+  text-align: left;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 650;
+  color: var(--ink-soft);
+  border-bottom: 1px solid var(--line);
+  padding: 13px 18px;
+  white-space: nowrap;
+  vertical-align: middle;
+  background: var(--paper-2);
+}
+td {
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: middle;
+  /* On a cell `height` reads as a minimum, so short rows keep the same rhythm
+     as ones whose text wraps rather than collapsing to a thin band. */
+  height: 24px;
+  /* Reference numbers and file names have no spaces to break at, so they
+     still break; `break-word` stops ordinary words like "Highways" being
+     shredded to make a column narrower than its longest word. */
+  overflow-wrap: break-word;
+}
+/* The outer columns sit against the card edge, so they get the wider gutter
+   the inner column gaps already have. */
+th:first-child,
+td:first-child {
+  padding-left: 20px;
+}
+th:last-child,
+td:last-child {
+  padding-right: 20px;
+}
+tbody tr:last-child td {
+  border-bottom: none;
+}
+tbody tr {
+  transition: background var(--fast) var(--ease);
+}
+tbody tr:hover td {
+  background: var(--paper-2);
+}
+/* A row that opens a record. The name in the first cell reads as ordinary
+   table text, so the pointer and a hover fill stronger than the plain
+   reading highlight are what say the whole row is the target. */
+tr.row-clickable {
+  cursor: pointer;
+}
+tr.row-clickable:hover td,
+tr.row-clickable:focus-visible td {
+  background: var(--accent-soft);
+}
+/* Rows are reachable by keyboard in place of the link they replaced. The
+   ring is drawn inside the row; the global 2px offset would put it under
+   the neighbouring rows. */
+tr.row-clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 0;
+}
+
+tr.row-editing td,
+tr.row-editing:hover td {
+  background: var(--accent-soft);
+}
+/* The marker belongs to the row, so it is drawn once at its leading edge —
+   on every cell it would read as column rules. */
+tr.row-editing td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+/* The first column carries the record's name — it leads the row. */
+tbody td:first-child {
+  font-weight: 550;
+  color: var(--ink);
+}
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+  white-space: nowrap;
+}
+.cell-amount {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* The column carrying the record's name leads the row and is the one people
+   scan, so it is given room to hold a full name on one line while the narrow
+   columns below give theirs back. */
+.cell-name {
+  min-width: 220px;
+  width: 24%;
+}
+/* Dates, statuses, file links and buttons each hold one short value: wrapping
+   them reads as a fault, and `width: 1%` shrinks them to their content so the
+   slack goes to the name column instead. */
+.cell-tight {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.sort-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--fast) var(--ease);
+}
+.sort-header:hover {
+  color: var(--ink);
+}
+.sort-active {
+  color: var(--accent);
+}
+
+/* ---- pills, tags, chips, badges -------------------------------------- */
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  line-height: 1.55;
+  /* neutral default; the tag-* classes below override per value */
+  background: var(--paper);
+  color: var(--ink-soft);
+  /* `break-word`, not `anywhere`: a pill in a narrow table column should give
+     up its own width before it splits "aviation" across two lines. */
+  overflow-wrap: break-word;
+}
+
+/* Status pills carry a dot, so a value reads as a state rather than as a
+   label. Free-text tags (`tag-neutral`) deliberately do not. */
+.tag-loi::before,
+.tag-work-order::before,
+.tag-completion-certificate::before,
+.tag-purchase-order::before,
+.tag-contract::before,
+.tag-ongoing::before,
+.tag-completed::before,
+.tag-valid::before,
+.tag-expired::before,
+.tag-no-expiry::before,
+.tag-identified::before,
+.tag-preparing::before,
+.tag-submitted::before,
+.tag-won::before,
+.tag-lost::before,
+.tag-withdrawn::before {
+  content: "";
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.85;
+}
+
+/* Project document types */
+.tag-loi { background: var(--accent-soft); color: var(--accent); }
+.tag-work-order { background: var(--plum-soft); color: var(--plum); }
+.tag-completion-certificate { background: var(--good-soft); color: var(--good); }
+.tag-purchase-order { background: var(--amber-soft); color: var(--amber); }
+.tag-contract { background: var(--teal-soft); color: var(--teal); }
+
+/* Project status */
+.tag-ongoing { background: var(--accent-soft); color: var(--accent); }
+.tag-completed { background: var(--good-soft); color: var(--good); }
+
+/* Certificate validity */
+.tag-valid { background: var(--good-soft); color: var(--good); }
+.tag-expired { background: var(--warn-soft); color: var(--warn); }
+.tag-no-expiry { background: var(--paper); color: var(--ink-soft); }
+
+/* Tender status, read as a pipeline: identified, in progress, out for
+   decision, then won or lost. */
+.tag-identified { background: var(--paper); color: var(--ink-soft); }
+.tag-preparing { background: var(--amber-soft); color: var(--amber); }
+.tag-submitted { background: var(--accent-soft); color: var(--accent); }
+.tag-won { background: var(--good-soft); color: var(--good); }
+.tag-lost { background: var(--warn-soft); color: var(--warn); }
+.tag-withdrawn { background: var(--paper); color: var(--ink-faint); }
+
+.tag-neutral {
+  gap: 3px;
+  padding: 3px 4px 3px 10px;
+  background: var(--card);
+  color: var(--ink-soft);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+/* Without a remove button there is no trailing control to leave room for. */
+.tag-neutral:not(:has(.chip-remove)) {
+  padding-right: 10px;
+}
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.badge-latest,
+.deadline-flag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+.badge-latest {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.deadline-flag {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+/* ---- list screens ---------------------------------------------------- */
+
+/* Search, filters, then the table — one column each, stacked. The filters
+   used to hold a fixed column beside the table, which the list tables need
+   more than the filters do. */
+.list-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+/* The grid gap owns the spacing now that the cards are stacked; the card's
+   own bottom margin would double it. */
+.list-layout > .card {
+  margin-bottom: 0;
+}
+.list-panel {
+  min-width: 0;
+}
+
+.list-head h2,
+.list-head h3 {
+  margin: 0;
+  font-size: 17px;
+  min-width: 0;
+}
+
+/* ---- filter bar ------------------------------------------------------ */
+
+.filter-bar {
+  padding: 16px 18px;
+  min-width: 0;
+}
+/* The search runs the full width of the bar, so it takes the whole line. */
+.filter-bar .filter-search .field {
+  margin-bottom: 0;
+}
+
+/* One compact row of filters. It wraps onto another line rather than
+   widening the page, which is why nothing in it is allowed to grow. */
+.filter-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+}
+.filter-toolbar .field {
+  flex: 0 1 auto;
+  width: 190px;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.filter-toolbar .field > label {
+  margin-bottom: 5px;
+}
+/* Controls and triggers share one height, so the row reads as a single band
+   whatever mix of them a screen has. */
+.filter-toolbar select,
+.filter-toolbar .btn {
+  height: 38px;
+}
+.filter-toolbar select {
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: 13.5px;
+}
+/* Clear sits at the end of the row, past everything else. */
+.filter-clear {
+  margin-left: auto;
+}
+
+/* ---- filter menus ---------------------------------------------------- */
+
+/* A filter whose controls do not fit on the row — checkboxes, a from/to
+   pair, the tag box — opens under its trigger instead. */
+.filter-menu {
+  position: relative;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.filter-menu-trigger {
+  gap: 7px;
+}
+/* A trigger holding values is marked, so a closed menu still says the list
+   is being narrowed. */
+.filter-menu-set {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+}
+.filter-menu-set:hover:enabled {
+  background: #E3EAFE;
+  border-color: var(--accent-line);
+  color: var(--accent-dark);
+}
+.filter-menu-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.filter-menu-caret {
+  font-size: 10px;
+  line-height: 1;
+  color: var(--ink-soft);
+}
+.filter-menu-set .filter-menu-caret {
+  color: var(--accent-dark);
+}
+
+.filter-menu-panel {
+  position: absolute;
+  z-index: 6;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 280px;
+  /* Never wider than the screen it opens on. */
+  max-width: calc(100vw - 32px);
+  /* A long option list scrolls inside the panel rather than running off the
+     bottom of the page. */
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 14px 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  animation: modal-in var(--fast) var(--ease);
+}
+/* Flipped when opening on the left edge would run the panel off screen. */
+.filter-menu-panel-end {
+  left: auto;
+  right: 0;
+}
+.filter-menu-panel .field:last-child,
+.filter-menu-panel .checkbox-group:last-child {
+  margin-bottom: 0;
+}
+.filter-menu-panel .form-row {
+  gap: 0 12px;
+}
+.filter-menu-panel .form-row .field {
+  margin-bottom: 0;
+}
+
+.list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  margin-bottom: 16px;
+}
+
+.filters {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: 18px;
+}
+.filters .field {
+  margin-bottom: 0;
+  min-width: 160px;
+  max-width: 100%;
+  flex: 1;
+}
+.filter-buttons {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+  border-radius: var(--radius-pill);
+  padding: 3px 5px 3px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  /* A long filter value wraps inside the chip instead of stretching it. */
+  overflow-wrap: anywhere;
+}
+.chip-remove {
+  display: inline-grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  border-radius: 50%;
+  opacity: 0.65;
+  flex-shrink: 0;
+  transition: background var(--fast) var(--ease), opacity var(--fast) var(--ease);
+}
+.chip-remove:hover {
+  opacity: 1;
+  background: rgba(43, 74, 203, 0.12);
+}
+.tag-neutral .chip-remove:hover {
+  background: var(--line-soft);
+}
+
+.checkbox-group {
+  border: none;
+  margin: 0 0 16px 0;
+  padding: 0;
+  min-width: 0;
+}
+.checkbox-group legend {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  padding: 0;
+  margin-bottom: 7px;
+}
+.checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 13.5px;
+  font-weight: 400;
+  color: var(--ink-soft);
+  margin-bottom: 6px;
+  cursor: pointer;
+  /* Certificate and status names can be long; they wrap under the box. */
+  overflow-wrap: anywhere;
+  transition: color var(--fast) var(--ease);
+}
+.checkbox-row:hover {
+  color: var(--ink);
+}
+.checkbox-row input {
+  width: 15px;
+  height: 15px;
+  margin: 3px 0 0 0;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.tag-input {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  background: #fff;
+  box-shadow: var(--shadow-btn);
+  min-width: 0;
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+}
+.tag-input input {
+  border: none;
+  box-shadow: none;
+  padding: 2px;
+  flex: 1 1 90px;
+  min-width: 0;
+  font-size: 14px;
+}
+.tag-input input:focus {
+  outline: none;
+  box-shadow: none;
+}
+.tag-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+/* An inset track with a raised active segment — the state reads at a glance
+   without relying on colour alone. */
+.segmented {
+  display: inline-flex;
+  max-width: 100%;
+  gap: 3px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+  margin-bottom: 18px;
+  background: var(--paper);
+}
+.segment {
+  border: none;
+  background: none;
+  border-radius: var(--radius-xs);
+  padding: 7px 16px;
+  font-size: 13.5px;
+  font-family: inherit;
+  font-weight: 600;
+  color: var(--ink-soft);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease),
+    box-shadow var(--fast) var(--ease);
+}
+.segment:hover {
+  color: var(--ink);
+}
+.segment-active,
+.segment-active:hover {
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: var(--shadow-btn), 0 0 0 1px rgba(16, 24, 40, 0.04);
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.pagination .muted {
+  flex: 1;
+  min-width: 0;
+}
+
+/* A dashed box, so an empty result reads as a considered state rather than
+   as a page that failed to load. */
+.empty-state {
+  padding: 36px 24px;
+  text-align: center;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--paper-2);
+}
+.empty-state p {
+  margin: 0 0 14px 0;
+  font-size: 13.5px;
+}
+.empty-state p:last-child {
+  margin-bottom: 0;
+}
+
+/* ---- record screens -------------------------------------------------- */
+
+.detail-header {
+  padding: 24px;
+}
+.detail-header-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.detail-header-top > div:first-child {
+  min-width: 0;
+}
+.detail-header h2 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.25;
+  letter-spacing: -0.022em;
+}
+.detail-subtitle {
+  margin: 4px 0 0 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.detail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.detail-facts {
+  display: grid;
+  /* min() stops the track demanding 170px on a narrow screen, which would
+     push the grid past its container. */
+  grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
+  gap: 18px 24px;
+  margin: 0;
+}
+/* In the record header the facts sit below the title and actions, so they
+   need a rule to separate them. Inside a card of their own they follow a
+   heading that already does that job. */
+.detail-header .detail-facts {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line-soft);
+}
+.detail-facts-wide {
+  margin-top: 0;
+}
+.detail-facts > div {
+  min-width: 0;
+}
+.detail-facts dt {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  font-weight: 650;
+}
+.detail-facts dd {
+  margin: 5px 0 0 0;
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+  /* More tabs than fit scroll sideways rather than wrapping into a stack. */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+.tab {
+  border: none;
+  background: none;
+  padding: 10px 14px;
+  font-size: 13.5px;
+  font-family: inherit;
+  font-weight: 600;
+  color: var(--ink-soft);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: color var(--fast) var(--ease), border-color var(--fast) var(--ease);
+}
+.tab:hover {
+  color: var(--ink);
+  border-bottom-color: var(--line);
+}
+.tab-active,
+.tab-active:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ---- evidence strip -------------------------------------------------- */
+
+.evidence-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.evidence-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  border-radius: var(--radius-pill);
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  overflow-wrap: break-word;
+}
+.evidence-compact .evidence-item {
+  padding: 3px 9px;
+  font-size: 11px;
+  gap: 4px;
+  /* Three short labels in a table cell: a wrapped one reads as a fault, and
+     the column is wide enough to hold them whole. */
+  white-space: nowrap;
+}
+.evidence-yes {
+  background: var(--good-soft);
+  border-color: #CDEADC;
+  color: var(--good);
+}
+.evidence-no {
+  background: var(--paper-2);
+  color: var(--ink-faint);
+  border-color: var(--line);
+  border-style: dashed;
+}
+.evidence-action {
+  cursor: pointer;
+  font-family: inherit;
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease),
+    border-color var(--fast) var(--ease);
+}
+.evidence-action:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent-line);
+  border-style: solid;
+}
+
+/* ---- documents and costs --------------------------------------------- */
+
+.doc-group {
+  margin-bottom: 24px;
+  min-width: 0;
+}
+.doc-group:last-child {
+  margin-bottom: 0;
+}
+.doc-group h4 {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: 12px;
+}
+
+/* The one figure the costs tab exists to produce, set apart from the rows
+   that add up to it. */
+.cost-total {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 12px;
+  margin: 16px 0 0 0;
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--paper-2);
+  border: 1px solid var(--line-soft);
+  text-align: right;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+.cost-total strong {
+  color: var(--ink);
+  margin-left: 0;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---- modal ----------------------------------------------------------- */
+
+@keyframes scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes drawer-in {
+  from { transform: translateX(16px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(16, 24, 40, 0.42);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 10;
+  animation: scrim-in 140ms var(--ease);
+}
+.modal {
+  background: var(--card);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  max-width: 460px;
+  width: 100%;
+  /* A long confirmation scrolls inside the dialog instead of off-screen. */
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  box-shadow: var(--shadow-raised);
+  animation: modal-in 180ms var(--ease);
+}
+.modal h2 {
+  font-size: 18px;
+  letter-spacing: -0.02em;
+  margin-bottom: 12px;
+}
+.modal p {
+  margin: 0 0 12px 0;
+  font-size: 13.5px;
+  color: var(--ink-soft);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* ---- drawer ---------------------------------------------------------- */
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(16, 24, 40, 0.42);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  display: flex;
+  z-index: 20;
+  animation: scrim-in 140ms var(--ease);
+}
+/* The panel floats clear of the window edges rather than butting against
+   them, which is what keeps it reading as a layer over the screen. */
+.drawer {
+  background: var(--card);
+  width: 100%;
+  max-width: 520px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-panel);
+  animation: drawer-in 200ms var(--ease);
+}
+.drawer-right {
+  margin: 12px 12px 12px auto;
+}
+.drawer-left {
+  margin: 12px auto 12px 12px;
+  max-width: 268px;
+}
+.drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--line-soft);
+  flex-shrink: 0;
+}
+.drawer-head h2 {
+  margin: 0;
+  font-size: 17px;
+  letter-spacing: -0.02em;
+  flex: 1;
+  min-width: 0;
+}
+.drawer-close {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: none;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--ink-soft);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+.drawer-close:hover:enabled {
+  background: var(--paper);
+  color: var(--ink);
+}
+.drawer-body {
+  padding: 20px 22px 26px 22px;
+  overflow-y: auto;
+  min-width: 0;
+}
+.drawer-context {
+  margin: 0 0 18px 0;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--paper-2);
+  border: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+.drawer-preview {
+  margin-top: 24px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 18px;
+}
+.drawer-left .drawer-body {
+  padding: 10px;
+}
+.drawer-left .nav-link {
+  color: var(--ink-soft);
+  background: none;
+  box-shadow: none;
+}
+.drawer-left .nav-link:hover {
+  background: var(--paper);
+  color: var(--ink);
+}
+.drawer-left .nav-link-active,
+.drawer-left .nav-link-active:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: none;
+}
+
+.file-preview {
+  width: 100%;
+  max-width: 100%;
+  height: 420px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--paper-2);
+}
+img.file-preview {
+  height: auto;
+  object-fit: contain;
+}
+/* In the full-screen viewer the file takes the room it is given, rather than
+   the fixed height that suits a drawer. */
+.file-preview-fill {
+  height: 100%;
+}
+img.file-preview-fill {
+  width: auto;
+  height: auto;
+  max-height: 100%;
+  border: none;
+  background: none;
+}
+
+/* The two things a drawer offers besides the preview itself. */
+.preview-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+/* ---- document preview ------------------------------------------------ */
+
+/* Sits above the drawers (z-index 20), because a drawer is one of the places
+   the preview is opened from and must stay behind it. */
+.preview-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(16, 24, 40, 0.42);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 30;
+  animation: scrim-in 140ms var(--ease);
+}
+.preview-panel {
+  /* The panel is fixed-position but still a *descendant* of whatever opened
+     it — often the File cell, which is `.cell-tight` and sets white-space:
+     nowrap. That inherits straight through to everything in here, so any
+     sentence long enough to wrap would run off the edge instead. */
+  white-space: normal;
+  background: var(--card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-panel);
+  width: 100%;
+  max-width: 1040px;
+  height: calc(100vh - 40px);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  animation: modal-in 180ms var(--ease);
+}
+.preview-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line-soft);
+  flex-shrink: 0;
+}
+.preview-title {
+  flex: 1;
+  min-width: 0;
+}
+.preview-title h2 {
+  margin: 0;
+  font-size: 17px;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+.preview-title p {
+  margin: 2px 0 0 0;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.preview-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+/* The document itself is centred on a quiet ground, and scrolls in here when
+   it is taller or wider than the panel. */
+.preview-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px 20px 20px 20px;
+  overflow: auto;
+  background: var(--paper);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+.preview-body .muted {
+  font-size: 13.5px;
+}
+
+/* A button that reads as the link it replaced, so the File column looks
+   exactly as it did when it was an anchor. */
+.link-button {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 550;
+  color: var(--accent);
+  cursor: pointer;
+  transition: color var(--fast) var(--ease);
+}
+.link-button:hover {
+  color: var(--accent-dark);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* ---- manual redaction ------------------------------------------------ */
+
+/* The redaction view is a column that fills the panel rather than one
+   centred document, so the body stops centring while it is up. */
+.preview-body-redact {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+}
+
+.redact {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+/* The column's own gap does the spacing here; the alert's bottom margin
+   would add a second one on top of it. */
+.redact .alert {
+  margin-bottom: 0;
+}
+
+.redact-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-card);
+}
+.redact-bar-info {
+  font-size: 13.5px;
+  min-width: 0;
+}
+.redact-bar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.redact-hint {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+/* The page scrolls in here when it is taller or — once zoomed in — wider
+   than the panel.
+
+   Centring is done by the surface's own auto margins rather than by
+   `justify-content: center`. A centred flex item that overflows its scroll
+   container has its leading edge pushed outside the scrollable area, where no
+   amount of scrolling can reach it; auto margins collapse to zero as soon as
+   the free space is gone, so the left of a zoomed page stays reachable. */
+.redact-stage {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+/* The drawing surface *is* the page: the image fills it exactly and the
+   element carries the page's aspect ratio, so a box at 40% across this
+   element is at 40% across the page the backend redacts. The ratio is set
+   inline, per page, because only the document knows it. */
+.redact-surface {
+  position: relative;
+  /* At 100% the page fills the stage, capped so it never gets unreadably
+     wide. Zooming multiplies that: past the stage width the element simply
+     overflows and the stage scrolls, which is what keeps the rectangles
+     honest — they are stored as fractions of this element's measured box, so
+     they mean the same thing whatever size it happens to be. */
+  width: calc(min(100%, 860px) * var(--redact-zoom, 1));
+  margin: 0 auto;
+  flex-shrink: 0;
+  background: #FFFFFF;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  cursor: crosshair;
+  /* Without this, a drag on a touch screen scrolls the stage instead of
+     drawing and the pointer events never arrive. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.redact-page {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* Clicks belong to the surface underneath, which owns the drag. */
+  pointer-events: none;
+}
+.redact-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  font-size: 13px;
+}
+
+/* A marked area is solid white, because that is exactly what the generated
+   copy will look like — a translucent one showing the figures through it
+   invites the reader to wonder how much of the redaction is real.
+
+   The hairline outline belongs to this screen only and is not in the output:
+   white-on-white would otherwise leave the marks invisible against the page,
+   with no way to tell a marked area from blank paper. */
+.redact-area {
+  position: absolute;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: #FFFFFF;
+  box-shadow: inset 0 0 0 1px var(--ink-faint);
+  cursor: pointer;
+}
+/* Selecting a box is how you check what is under it before removing it, so
+   the selected one — and only that one — turns translucent. */
+.redact-area-selected {
+  background: rgba(255, 255, 255, 0.45);
+  box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 3px var(--accent-ring);
+}
+/* The rectangle still being dragged out, light enough that the content under
+   it stays readable while its edge is being placed. */
+.redact-area-draft {
+  background: rgba(255, 255, 255, 0.5);
+  box-shadow: inset 0 0 0 1.5px var(--ink);
+  pointer-events: none;
+}
+
+/* Preview redaction shows the generated file itself, so this is laid out the
+   way the ordinary preview body is — FilePreview's `fill` is written for a
+   centred flex parent with a definite height. */
+.redact-preview {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+}
+
+/* While a middle-button drag is panning, the whole surface reads as grabbed
+   rather than as a place to draw. */
+.redact-surface-panning,
+.redact-surface-panning .redact-area {
+  cursor: grabbing;
+}
+
+/* Zoom on the left, paging in the middle, so the two never swap places when
+   a single-page document hides the pager. */
+.redact-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
+.redact-zoom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+/* Fixed width, so stepping through 50% → 100% → 125% does not shuffle the
+   buttons either side of the readout. */
+.redact-zoom-level {
+  min-width: 46px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+/* Square, so − and + read as a matched pair rather than as two words. */
+.redact-zoom-step {
+  min-width: 30px;
+  padding-left: 0;
+  padding-right: 0;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.redact-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.redact-message {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+}
+
+/* ---- responsive ------------------------------------------------------ */
+
+@media (max-width: 980px) {
+  .detail-header-top {
+    flex-direction: column;
+  }
+}
+
+/* The sidebar becomes the topbar's drawer. */
+@media (max-width: 760px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+  .sidebar {
+    display: none;
+  }
+  .nav-toggle {
+    display: block;
+  }
+  .topbar {
+    padding: 10px 16px;
+  }
+  .content {
+    padding: 20px 16px 40px 16px;
+  }
+  .card {
+    padding: 18px 16px;
+    border-radius: var(--radius-sm);
+  }
+  .card.form {
+    max-width: none;
+  }
+  .filter-bar {
+    padding: 16px;
+  }
+  /* Every filter takes the full width of its line, so a wrapped row reads as
+     a list rather than as ragged offcuts. */
+  .filter-toolbar .field,
+  .filter-menu,
+  .filter-menu .btn {
+    width: 100%;
+  }
+  .filter-clear {
+    margin-left: 0;
+    width: 100%;
+  }
+  .detail-header {
+    padding: 20px 16px;
+  }
+  .detail-header h2 {
+    font-size: 19px;
+  }
+  /* Below this width the floating panel wastes more space than it earns. */
+  .drawer {
+    border-radius: 0;
+    animation-name: scrim-in;
+  }
+  .drawer-right,
+  .drawer-left {
+    margin: 0;
+  }
+  .drawer-right {
+    margin-left: auto;
+  }
+  .drawer-left {
+    margin-right: auto;
+  }
+  /* Same reasoning as the drawer: the preview takes the whole screen rather
+     than floating in the middle of a phone-sized one. */
+  .preview-backdrop {
+    padding: 0;
+  }
+  .preview-panel {
+    height: 100vh;
+    border-radius: 0;
+  }
+  .preview-body {
+    border-radius: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  /* The title gives way first; Download and Close stay reachable. */
+  .preview-head {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .preview-title {
+    flex-basis: 100%;
+  }
+  .preview-actions {
+    flex: 1;
+  }
+  .preview-actions .btn {
+    flex: 1;
+  }
+  /* Same reasoning one level down: the redaction actions stop sitting
+     opposite the count and take the width as their own row. */
+  .redact-bar {
+    justify-content: stretch;
+  }
+  .redact-bar-actions {
+    flex: 1;
+  }
+  .redact-bar-actions .btn {
+    flex: 1;
+  }
+  .form-row {
+    grid-template-columns: 1fr;
+  }
+  .detail-actions,
+  .detail-actions .btn {
+    width: 100%;
+  }
+  .form-actions-end {
+    margin-left: 0;
+  }
+}

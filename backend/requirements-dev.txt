@@ -1,0 +1,5 @@
+# Only needed to run verify_mongo.py --offline, which exercises every
+# endpoint against an in-memory MongoDB stand-in. Not needed to run the app.
+-r requirements.txt
+mongomock==4.3.0
+httpx==0.28.1
