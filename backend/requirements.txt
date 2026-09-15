@@ -18,6 +18,17 @@ pymongo==4.10.1
 # for in-house use; revisit before shipping the PMS to anyone outside.
 pymupdf==1.28.2
 
+# OCR for scanned PDFs and JPG/PNG images needs nothing installed beyond this
+# line. PyMuPDF's wheels carry Tesseract and Leptonica linked into MuPDF's own
+# shared library, so OCR runs inside the API process: there is no Tesseract
+# executable to install, nothing has to be on PATH, and no global
+# TESSDATA_PREFIX is set.
+#
+# The one thing OCR needs from outside the process is the language data, and
+# the project ships its own copy in backend/ocr/tessdata/. That is what makes
+# this deployable to a shared server with no root access and no effect on
+# anything else running there. See SETUP.md 3f.
+
 # Transitive dependencies, pinned only so a rebuilt venv matches the one the
 # app was verified against. Nothing here is imported directly: anyio arrives
 # with starlette (and httpx), click and websockets with uvicorn[standard].

@@ -5,7 +5,7 @@ import Tabs from "../../components/Tabs";
 import useQueryParams from "../../hooks/useQueryParams";
 import useResource from "../../hooks/useResource";
 import { getEmployee } from "../../api/employees";
-import { dash } from "../../lib/format";
+import { dash, formatExperience } from "../../lib/format";
 import EmployeeProfileTab from "./EmployeeProfileTab";
 import EmployeeCvsTab from "./EmployeeCvsTab";
 import EmployeeCertificationsTab from "./EmployeeCertificationsTab";
@@ -72,8 +72,12 @@ export default function EmployeeDetailPage() {
           { label: "Employee code", value: dash(record.employee_code) },
           { label: "Department", value: dash(record.department) },
           {
-            label: "Total experience",
-            value: dash(record.experience_years) === "—" ? "—" : `${record.experience_years} yrs`,
+            label: "Total Professional Experience",
+            value: formatExperience(record.total_experience_years),
+          },
+          {
+            label: "Experience with VGIL",
+            value: formatExperience(record.vgil_experience_years),
           },
           { label: "Email", value: dash(record.email) },
           { label: "Phone", value: dash(record.phone) },

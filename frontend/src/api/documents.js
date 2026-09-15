@@ -99,6 +99,27 @@ export function redactionPageImageUrl(documentId, pageIndex, width) {
 }
 
 /**
+ * Areas the backend thinks hold financial information, for the user to review.
+ *
+ * A suggestion and nothing else: this endpoint reads the stored file and
+ * returns rectangles in the *same* normalised format `createRedactedCopy`
+ * takes below, so a box the user accepts is posted back through the ordinary
+ * redaction request with no special casing at either end. Nothing is redacted,
+ * stored or changed by asking.
+ *
+ * Reports what it could not read as well as what it found — a scanned page
+ * has no text layer, and coming back empty from one has to be distinguishable
+ * from coming back empty from a clean one.
+ */
+export async function getSensitiveSuggestions(documentId) {
+  const res = await fetch(`${API_BASE_URL}/documents/${documentId}/redaction/suggestions`);
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to scan this document for figures"));
+  }
+  return res.json();
+}
+
+/**
  * Generates the redacted copy and returns it as a blob plus the name to save
  * it under, which the backend supplies in Content-Disposition.
  *

@@ -18,7 +18,7 @@ from pymongo import DESCENDING, ReturnDocument
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
-from .. import redaction, schemas, storage
+from .. import detection, redaction, schemas, storage
 from ..mongodb import get_documents
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -315,6 +315,25 @@ def get_redaction_page_image(
     """
     record = _redaction_source(document_id, documents)
     return redaction.page_image_response(record["stored_file_name"], page_index, width)
+
+
+@router.get(
+    "/{document_id}/redaction/suggestions", response_model=schemas.SensitiveScan
+)
+def get_sensitive_suggestions(
+    document_id: str, documents: Collection = Depends(get_documents)
+):
+    """Areas that look like financial information, for the user to review.
+
+    A suggestion and nothing more. This reads the stored file, finds figures
+    in its text layer and returns rectangles in the same normalised format a
+    hand-drawn box uses -- it does not redact, does not save the boxes, and
+    does not change the entry or its file. Accepting one in the UI simply
+    adds it to the areas posted to /redacted-copy below, which is still the
+    only thing that redacts anything.
+    """
+    record = _redaction_source(document_id, documents)
+    return detection.analyse(record["stored_file_name"])
 
 
 @router.post("/{document_id}/redacted-copy")

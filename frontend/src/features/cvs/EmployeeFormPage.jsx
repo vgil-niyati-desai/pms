@@ -12,6 +12,7 @@ import {
   updateEmployee,
 } from "../../api/employees";
 import { paths } from "../../app/routes";
+import { formatExperience } from "../../lib/format";
 
 /** Pulls just the editable fields off a record, so ids and timestamps stay put. */
 function formFromEmployee(employee) {
@@ -20,6 +21,23 @@ function formFromEmployee(employee) {
     next[key] = employee[key] ?? EMPTY_EMPLOYEE[key];
   }
   return next;
+}
+
+/**
+ * What a date will show as, right now, appended to the field's hint.
+ *
+ * The point of entering a date instead of a number is that the years look
+ * after themselves — but that also means the person typing never sees the
+ * figure they are setting. This puts it back in front of them as they type,
+ * so a mistyped year is obvious immediately rather than at tender time.
+ */
+function experienceHint(value) {
+  if (!value) return "";
+  const started = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(started.getTime())) return "";
+  const years = (Date.now() - started.getTime()) / (365.2425 * 24 * 60 * 60 * 1000);
+  if (years < 0) return " Starts in the future — shows as none yet.";
+  return ` Shows as ${formatExperience(years)} today, and updates on its own.`;
 }
 
 export default function EmployeeFormPage() {
@@ -55,10 +73,6 @@ export default function EmployeeFormPage() {
 
     if (!form.full_name.trim() || !form.designation.trim()) {
       setError("Please fill in Full name and Designation.");
-      return;
-    }
-    if (form.experience_years !== "" && Number(form.experience_years) < 0) {
-      setError("Total experience cannot be negative.");
       return;
     }
 
@@ -150,23 +164,38 @@ export default function EmployeeFormPage() {
         </FormRow>
 
         <FormRow>
-          <Field label="Date of joining" htmlFor="date_of_joining">
+          {/* Experience is entered as two dates and never as a number of
+              years. A number is right on the day it is typed and wrong every
+              day after, and nobody comes back to revise it; a date stays true
+              and the years are worked out on every read. The two are separate
+              because they answer different questions — a tender asks for
+              career experience and for length of service with the bidder, and
+              answering one with the other rules out people who qualify. */}
+          <Field
+            label="Total Professional Experience"
+            htmlFor="career_start_date"
+            hint={`Date their professional career began, at any employer.${experienceHint(
+              form.career_start_date,
+            )}`}
+          >
+            <input
+              id="career_start_date"
+              name="career_start_date"
+              type="date"
+              value={form.career_start_date}
+              onChange={handleChange}
+            />
+          </Field>
+          <Field
+            label="Experience with VGIL"
+            htmlFor="date_of_joining"
+            hint={`Date they joined VGIL.${experienceHint(form.date_of_joining)}`}
+          >
             <input
               id="date_of_joining"
               name="date_of_joining"
               type="date"
               value={form.date_of_joining}
-              onChange={handleChange}
-            />
-          </Field>
-          <Field label="Total experience (years)" htmlFor="experience_years">
-            <input
-              id="experience_years"
-              name="experience_years"
-              type="number"
-              min="0"
-              step="0.5"
-              value={form.experience_years}
               onChange={handleChange}
             />
           </Field>

@@ -23,8 +23,12 @@ export const EMPTY_EMPLOYEE = {
   employee_code: "",
   designation: "",
   department: "",
+  // The two dates experience is derived from. There is no experience_years
+  // here any more: a typed number is stale the next day, and these two are
+  // what the backend calculates Total Professional Experience and Experience
+  // with VGIL from on every read.
   date_of_joining: "",
-  experience_years: "",
+  career_start_date: "",
   highest_qualification: "",
   key_skills: "",
   email: "",

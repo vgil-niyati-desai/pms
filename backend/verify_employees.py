@@ -50,6 +50,20 @@ def instant(value):
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+# Experience is derived from dates, so the fixtures are built relative to
+# today rather than pinned to a calendar year. A record created with a start
+# date "14 years ago" still reads as 14 years when this suite runs in 2030 --
+# which is the property being tested, so the fixtures have to have it too.
+DAYS_PER_YEAR = 365.2425
+
+
+def years_ago(years):
+    """The ISO date `years` before today, the way the API computes it back."""
+    from datetime import date, timedelta
+
+    return (date.today() - timedelta(days=years * DAYS_PER_YEAR)).isoformat()
+
+
 def run_suite(employees, documents, offline=False):
     from fastapi.testclient import TestClient
 
@@ -73,8 +87,10 @@ def run_suite(employees, documents, offline=False):
             "employee_code": "EMP-014",
             "designation": "Project Manager",
             "department": "Civil",
-            "date_of_joining": "2015-06-01",
-            "experience_years": "14",
+            # 14 years of career, the last 10 of them at VGIL. The two
+            # differ on purpose: conflating them is the bug this replaced.
+            "career_start_date": years_ago(14),
+            "date_of_joining": years_ago(10),
             "highest_qualification": "B.E. Civil",
             "key_skills": "planning, contracts, QA",
             "email": "asha@example.com",
@@ -94,14 +110,30 @@ def run_suite(employees, documents, offline=False):
               asha["employee_code"] == "EMP-014"
               and asha["designation"] == "Project Manager"
               and asha["department"] == "Civil"
-              and asha["date_of_joining"] == "2015-06-01"
-              and asha["experience_years"] == "14"
+              and asha["date_of_joining"] == years_ago(10)
+              and asha["career_start_date"] == years_ago(14)
               and asha["highest_qualification"] == "B.E. Civil"
               and asha["key_skills"] == "planning, contracts, QA"
               and asha["email"] == "asha@example.com"
               and asha["phone"] == "98220 00000"
               and asha["notes"] == "Lead PM on the metering rollout.",
               str(asha))
+        # The whole point of the two dates: the figures are worked out on read,
+        # they differ from each other, and neither is stored anywhere.
+        check("Total Professional Experience is computed from career_start_date",
+              asha["total_experience_years"] == 14.0, str(asha.get("total_experience_years")))
+        check("Experience with VGIL is computed from date_of_joining",
+              asha["vgil_experience_years"] == 10.0, str(asha.get("vgil_experience_years")))
+        check("the two experience figures are not the same number",
+              asha["total_experience_years"] != asha["vgil_experience_years"])
+        from bson import ObjectId
+
+        stored = employees.find_one({"_id": ObjectId(asha_id)})
+        check("neither figure is stored on the record, only derived on read",
+              "total_experience_years" not in stored
+              and "vgil_experience_years" not in stored,
+              "a computed figure was written to the database")
+
         check("new employee starts with no CVs and no certifications",
               asha["cvs"] == [] and asha["certifications"] == [])
         check("created_at and updated_at were set",
@@ -113,9 +145,25 @@ def run_suite(employees, documents, offline=False):
         # open-ended - the forms still ask, the API does not insist.
         check("POST with a blank name -> 422 (the list links on it)",
               client.post("/employees/", json={"full_name": " ", "designation": "X"}).status_code == 422)
-        check("POST with negative experience -> 422 (invalid, not merely missing)",
+        # The dates drive a calculation now, so an unparseable one has to be
+        # refused rather than silently producing no experience at all.
+        check("POST with a malformed career start date -> 422",
               client.post("/employees/", json={"full_name": "X", "designation": "Y",
-                                               "experience_years": "-2"}).status_code == 422)
+                                               "career_start_date": "15/08/2024"}).status_code == 422)
+        check("POST with a malformed joining date -> 422",
+              client.post("/employees/", json={"full_name": "X", "designation": "Y",
+                                               "date_of_joining": "not a date"}).status_code == 422)
+        # A joining date can legitimately be set ahead for someone starting
+        # next month. That reads as no experience yet, never as a negative.
+        # Removed again straight away: the counts and sort orders below expect
+        # exactly the four records this suite creates on purpose.
+        res = client.post("/employees/", json={"full_name": "Future Starter",
+                                               "date_of_joining": years_ago(-1)})
+        check("a future joining date is allowed and reads as no experience yet",
+              res.status_code == 201 and res.json()["vgil_experience_years"] == 0.0,
+              res.text)
+        if res.status_code == 201:
+            client.delete(f"/employees/{res.json()['id']}")
         res = client.post("/employees/", json={"full_name": "Scratch Row"})
         ok = check("a name alone is enough; every other field is open-ended",
                    res.status_code == 201, res.text)
@@ -131,11 +179,18 @@ def run_suite(employees, documents, offline=False):
         # --- more records to filter and sort ----------------------------
         others = [
             {"full_name": "Vikram Iyer", "designation": "Site Engineer",
-             "department": "Civil", "experience_years": "6", "key_skills": "surveying"},
+             "department": "Civil", "key_skills": "surveying",
+             "career_start_date": years_ago(6), "date_of_joining": years_ago(6)},
+            # No dates at all: the record that must read as "not recorded"
+            # rather than as nought years.
             {"full_name": "meera Pillai", "designation": "Electrical Engineer",
-             "department": "MEP", "experience_years": ""},
+             "department": "MEP"},
+            # 9 years of career, only 2 of them here. The case the old single
+            # number got wrong: filtering on total must find him, and the two
+            # columns must not agree.
             {"full_name": "Rahul Deshpande", "designation": "Project Manager",
-             "department": "IT", "experience_years": "9", "employee_code": "EMP-021"},
+             "department": "IT", "employee_code": "EMP-021",
+             "career_start_date": years_ago(9), "date_of_joining": years_ago(2)},
         ]
         ids = {}
         for body in others:
@@ -174,22 +229,46 @@ def run_suite(employees, documents, offline=False):
         check("department filter narrows to that department",
               names(found) == ["meera Pillai"], str(names(found)))
 
+        # --- the computed figures across the list ------------------------
+        rows = {row["full_name"]: row for row in client.get("/employees/").json()["items"]}
+        check("every row carries both experience figures",
+              all("total_experience_years" in row and "vgil_experience_years" in row
+                  for row in rows.values()))
+        check("a record with no dates reports no experience, not zero",
+              rows["meera Pillai"]["total_experience_years"] is None
+              and rows["meera Pillai"]["vgil_experience_years"] is None,
+              str(rows["meera Pillai"].get("total_experience_years")))
+        check("total and VGIL differ where the person worked elsewhere first",
+              rows["Rahul Deshpande"]["total_experience_years"] == 9.0
+              and rows["Rahul Deshpande"]["vgil_experience_years"] == 2.0,
+              str(rows["Rahul Deshpande"]))
+        check("they agree where the person has only ever worked here",
+              rows["Vikram Iyer"]["total_experience_years"]
+              == rows["Vikram Iyer"]["vgil_experience_years"] == 6.0,
+              str(rows["Vikram Iyer"]))
+
         # --- experience range -------------------------------------------
-        if offline:
-            # The range converts the string field to a number with $convert,
-            # which mongomock does not implement. The live run covers these.
-            print("  [SKIP] the experience range filter (needs $convert; run without --offline)")
-        else:
-            found = client.get("/employees/", params={"min_experience": "8"}).json()
-            check("min experience keeps 8y and up",
-                  sorted(names(found)) == ["Asha Rao", "Rahul Deshpande"], str(names(found)))
-            found = client.get("/employees/",
-                               params={"min_experience": "1", "max_experience": "7"}).json()
-            check("a range keeps only those inside it",
-                  names(found) == ["Vikram Iyer"], str(names(found)))
-            found = client.get("/employees/", params={"min_experience": "0"}).json()
-            check("no recorded experience cannot satisfy a range, even one from zero",
-                  "meera Pillai" not in names(found), str(names(found)))
+        # These used to be skipped offline: the old filter converted a string
+        # field with $convert, which mongomock does not implement. Bounding a
+        # stored date instead is a plain comparison, so it runs everywhere --
+        # and it is the same comparison a real MongoDB will make.
+        found = client.get("/employees/", params={"min_experience": "8"}).json()
+        check("min experience keeps 8y and up, counted from the career start",
+              sorted(names(found)) == ["Asha Rao", "Rahul Deshpande"], str(names(found)))
+        found = client.get("/employees/",
+                           params={"min_experience": "1", "max_experience": "7"}).json()
+        check("a range keeps only those inside it",
+              names(found) == ["Vikram Iyer"], str(names(found)))
+        found = client.get("/employees/", params={"min_experience": "0"}).json()
+        check("no recorded experience cannot satisfy a range, even one from zero",
+              "meera Pillai" not in names(found), str(names(found)))
+        # Rahul has 2 years with VGIL and 9 in total. The filter bounds the
+        # total, so a 5-year floor has to keep him -- bounding VGIL tenure by
+        # mistake would drop him, which is the failure this whole change is
+        # about.
+        found = client.get("/employees/", params={"min_experience": "5"}).json()
+        check("the range bounds total experience, not time at VGIL",
+              "Rahul Deshpande" in names(found), str(names(found)))
 
         # --- sorting ----------------------------------------------------
         order = names(client.get("/employees/", params={"sort": "full_name"}).json())
@@ -198,13 +277,25 @@ def run_suite(employees, documents, offline=False):
         check("sort by -full_name reverses it",
               names(client.get("/employees/", params={"sort": "-full_name"}).json())
               == list(reversed(order)))
-        if offline:
-            print("  [SKIP] experience sorts as a number (needs $convert; run without --offline)")
-        else:
-            order = names(client.get("/employees/", params={"sort": "experience_years"}).json())
-            check("experience sorts as a number, 6 before 9 before 14",
-                  order[:3] == ["Vikram Iyer", "Rahul Deshpande", "Asha Rao"], str(order))
-            check("blank experience sorts last", order[-1] == "meera Pillai", str(order))
+        # Sorting an experience column sorts the date behind it, backwards --
+        # so this also checks that the inversion was not forgotten.
+        order = names(client.get("/employees/",
+                                 params={"sort": "total_experience_years"}).json())
+        check("total experience sorts ascending, 6 before 9 before 14",
+              order[:3] == ["Vikram Iyer", "Rahul Deshpande", "Asha Rao"], str(order))
+        check("no recorded experience sorts last", order[-1] == "meera Pillai", str(order))
+        order = names(client.get("/employees/",
+                                 params={"sort": "-total_experience_years"}).json())
+        check("-total experience puts the most experienced first",
+              order[:3] == ["Asha Rao", "Rahul Deshpande", "Vikram Iyer"], str(order))
+        check("no recorded experience still sorts last, both ways",
+              order[-1] == "meera Pillai", str(order))
+        # And the two columns order people differently, which is the point of
+        # having both: Rahul has more career than Vikram but less time here.
+        order = names(client.get("/employees/",
+                                 params={"sort": "-vgil_experience_years"}).json())
+        check("VGIL experience sorts on its own date, not the career one",
+              order[:3] == ["Asha Rao", "Vikram Iyer", "Rahul Deshpande"], str(order))
         check("an unknown sort field falls back to the default instead of erroring",
               client.get("/employees/", params={"sort": "nonsense"}).status_code == 200)
 

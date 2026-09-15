@@ -1,16 +1,42 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import FilePreview from "./FilePreview";
 import {
   createRedactedCopy,
   getRedactionSource,
+  getSensitiveSuggestions,
   redactionPageImageUrl,
 } from "../api/documents";
 
 /**
- * Manual redaction: draw boxes over the sensitive parts of a document, check
- * the result, then download a permanently redacted copy of it.
+ * Redaction: cover the sensitive parts of a document, check the result, then
+ * download a permanently redacted copy of it.
  *
- * Three things are worth knowing about how this works.
+ * Boxes reach the page two ways, and they are the same kind of thing once
+ * they get there.
+ *
+ *   * **Drawn by hand.** Drag across the page, exactly as before.
+ *   * **Suggested.** On open, the backend scans the document for financial
+ *     figures — prices, contract values, rates, EMD, totals — and returns
+ *     rectangles in the same normalised format. It reads a normal PDF's text
+ *     layer, and runs OCR over scanned pages, JPGs and PNGs; a mixed PDF gets
+ *     whichever treatment each page needs. They arrive as *proposals*:
+ *     nothing is covered until a person accepts it, and an accepted one
+ *     simply joins the list posted to the ordinary redaction endpoint.
+ *     Rejecting one drops it and nothing else happens.
+ *
+ * A suggestion read by OCR is marked as such. OCR is a guess about pixels in
+ * a way reading a content stream is not, so those get a badge and the panel
+ * says which pages they came from — the reviewer is the one who can check the
+ * box against the page, and can only do it if told where to look.
+ *
+ * The two are kept visibly apart on purpose. A confirmed redaction — drawn or
+ * accepted — is solid white, because that is what the generated copy will
+ * look like. A suggestion still waiting on a decision is a dashed amber
+ * outline with the page showing through it, so it can never be mistaken for
+ * something already covered. The count in the bar only ever counts confirmed
+ * areas, for the same reason.
+ *
+ * Three things about the mechanics are worth knowing.
  *
  * The page is an image, not the usual preview. The normal preview hands a PDF
  * to the browser's own viewer inside an <iframe>, and an iframe is opaque —
@@ -18,11 +44,12 @@ import {
  * redaction asks the backend to render each page and draws over that instead,
  * which also means PDFs and PNG/JPGs are selected in exactly the same way.
  *
- * The boxes here are only a *selection*. They are drawn in fractions of the
- * page (origin top-left), sent to the backend, and it is the backend that
- * deletes the covered text from the copy it generates. Nothing on this screen
- * is what makes the copy safe, and nothing on this screen changes the
- * original — it is still there, unredacted, behind Close.
+ * The boxes here are only a *selection*. They are in fractions of the page
+ * (origin top-left), sent to the backend, and it is the backend that deletes
+ * the covered text from the copy it generates. Nothing on this screen is what
+ * makes the copy safe, and nothing on this screen changes the original — it
+ * is still there, unredacted, behind Close. Scanning for suggestions does not
+ * change it either; that endpoint only reads.
  *
  * Preview redaction is therefore not a mock-up of the result: it asks the
  * backend for the real copy and shows that. The bytes it displays are cached
@@ -62,6 +89,11 @@ const MIN_AREA = 0.004;
 const ZOOM_STEPS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
 const DEFAULT_ZOOM = 1;
 
+/** Where a suggestion stands. Only `accepted` ones are ever redacted. */
+const PENDING = "pending";
+const ACCEPTED = "accepted";
+const REJECTED = "rejected";
+
 function clamp01(value) {
   return Math.min(1, Math.max(0, value));
 }
@@ -77,6 +109,15 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
   const [draft, setDraft] = useState(null);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const [panning, setPanning] = useState(false);
+
+  // The automatic pass: what it found, what it could not read, and whether it
+  // is still running. Its failure is deliberately not fatal — the manual tool
+  // has to keep working when the scan cannot.
+  const [suggestions, setSuggestions] = useState([]);
+  const [scan, setScan] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState("");
+  const [reviewOpen, setReviewOpen] = useState(true);
 
   // "preview" or "download" while that action is in flight, "" otherwise.
   const [busy, setBusy] = useState("");
@@ -120,12 +161,73 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
     };
   }, [documentId]);
 
+  /**
+   * Scan for financial figures, once, as the document opens.
+   *
+   * Separate from loading the source so a scan that fails — or a backend
+   * without the detection endpoint — costs the suggestions and nothing else.
+   * The page still renders and boxes can still be drawn by hand, which is why
+   * this sets `scanError` rather than `loadError`.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    setSuggestions([]);
+    setScan(null);
+    setScanError("");
+    setScanning(true);
+    getSensitiveSuggestions(documentId)
+      .then((data) => {
+        if (cancelled) return;
+        setScan(data);
+        setSuggestions(
+          (data.detections || []).map((detection) => ({
+            ...detection,
+            status: PENDING,
+          })),
+        );
+      })
+      .catch((err) => {
+        if (!cancelled) setScanError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setScanning(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [documentId]);
+
   const pages = source?.pages ?? [];
   const page = pages[pageIndex];
-  const pageAreas = areas.filter((area) => area.page === pageIndex);
 
-  // A new page is a new image to wait for, and the message about the last
-  // generated copy no longer describes what is on screen.
+  /**
+   * Every box that will actually be redacted: drawn by hand, plus the
+   * suggestions a person accepted.
+   *
+   * One list from here on. The backend has no idea which is which, and there
+   * is nothing for it to know — an accepted suggestion is a rectangle on a
+   * page, the same as a drawn one.
+   */
+  const confirmed = useMemo(
+    () => [
+      ...areas,
+      ...suggestions.filter((suggestion) => suggestion.status === ACCEPTED),
+    ],
+    [areas, suggestions],
+  );
+
+  const pending = useMemo(
+    () => suggestions.filter((suggestion) => suggestion.status === PENDING),
+    [suggestions],
+  );
+  const pendingHere = pending.filter((suggestion) => suggestion.page === pageIndex);
+  const pendingElsewhere = pending.length - pendingHere.length;
+  const acceptedCount = suggestions.filter(
+    (suggestion) => suggestion.status === ACCEPTED,
+  ).length;
+  const confirmedHere = confirmed.filter((area) => area.page === pageIndex);
+
+  // A new page is a new image to wait for.
   useEffect(() => {
     setPageLoaded(false);
   }, [pageIndex]);
@@ -169,13 +271,14 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
     setPreview(next);
   }, []);
 
-  // Changing the selection makes any built copy stale: it no longer shows
-  // what would download. Dropping both here means the two can never disagree,
-  // whichever action changed the areas.
+  // Changing what would be redacted makes any built copy stale: it no longer
+  // shows what would download. Dropping both here means the two can never
+  // disagree, whichever action changed the set — a drawn box, a removed one,
+  // or a suggestion being accepted or rejected.
   useEffect(() => {
     builtRef.current = null;
     showPreview(null);
-  }, [areas, showPreview]);
+  }, [confirmed, showPreview]);
 
   // Nothing else revokes the last object URL when the redactor unmounts.
   // Done through the ref rather than showPreview, which would also be setting
@@ -187,12 +290,49 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
     [],
   );
 
+  const setSuggestionStatus = useCallback((id, status) => {
+    setSuggestions((current) =>
+      current.map((suggestion) =>
+        suggestion.id === id ? { ...suggestion, status } : suggestion,
+      ),
+    );
+    setDone("");
+  }, []);
+
+  /** Accept or reject every suggestion still waiting, across all pages. */
+  function decideAll(status) {
+    setSuggestions((current) =>
+      current.map((suggestion) =>
+        suggestion.status === PENDING ? { ...suggestion, status } : suggestion,
+      ),
+    );
+    setSelectedId(null);
+    setDone("");
+  }
+
+  /**
+   * Take the highlighted box off the page.
+   *
+   * What that means depends on where the box came from, and both readings are
+   * the same gesture: a drawn area is deleted, a suggestion is rejected. An
+   * accepted suggestion goes back to pending rather than vanishing, so a
+   * mis-click is one click to undo instead of a lost detection.
+   */
   const removeSelected = useCallback(() => {
     if (selectedId === null) return;
+    const suggestion = suggestions.find((entry) => entry.id === selectedId);
+    if (suggestion) {
+      setSuggestionStatus(
+        selectedId,
+        suggestion.status === ACCEPTED ? PENDING : REJECTED,
+      );
+      setSelectedId(null);
+      return;
+    }
     setAreas((current) => current.filter((area) => area.id !== selectedId));
     setSelectedId(null);
     setDone("");
-  }, [selectedId]);
+  }, [selectedId, suggestions, setSuggestionStatus]);
 
   // Delete and Backspace remove the highlighted box, which is what every
   // other canvas-shaped tool does. Skipped while typing in a field.
@@ -277,7 +417,9 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
     setDraft(null);
     // A click that never moved is a click, not an area worth redacting.
     if (rect.width < MIN_AREA || rect.height < MIN_AREA) return;
-    const id = nextIdRef.current++;
+    // Prefixed, because suggestions carry ids of their own and the two sets
+    // share one `selectedId`.
+    const id = `manual-${nextIdRef.current++}`;
     setAreas((current) => [...current, { id, page: pageIndex, ...rect }]);
     setSelectedId(id);
   }
@@ -289,10 +431,21 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
     setDraft(null);
   }
 
+  /** Clear the drawn boxes. Suggestions are decided, not cleared. */
   function clearAll() {
     setAreas([]);
     setSelectedId(null);
     setDone("");
+  }
+
+  /** The next page that still has something waiting to be reviewed. */
+  function goToPending() {
+    const next =
+      pending.find((suggestion) => suggestion.page > pageIndex) ?? pending[0];
+    if (next) {
+      setPageIndex(next.page);
+      setSelectedId(next.id);
+    }
   }
 
   /**
@@ -304,7 +457,7 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
    */
   async function buildCopy() {
     if (builtRef.current) return builtRef.current;
-    const payload = areas.map(({ page: index, x, y, width, height }) => ({
+    const payload = confirmed.map(({ page: index, x, y, width, height }) => ({
       page: index,
       x,
       y,
@@ -374,6 +527,7 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
 
   const pageCount = pages.length;
   const aspect = page && page.width ? page.height / page.width : 1.414;
+  const selectedSuggestion = suggestions.find((entry) => entry.id === selectedId);
 
   return (
     <div className="redact">
@@ -381,15 +535,16 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
         <div className="redact-bar-info">
           {preview ? (
             <span className="muted">
-              Previewing the redacted copy — <strong>{areas.length}</strong>
-              {areas.length === 1 ? " area applied" : " areas applied"}
+              Previewing the redacted copy — <strong>{confirmed.length}</strong>
+              {confirmed.length === 1 ? " area applied" : " areas applied"}
             </span>
           ) : (
             <>
-              <strong>{areas.length}</strong>
+              <strong>{confirmed.length}</strong>
               <span className="muted">
-                {areas.length === 1 ? " area marked" : " areas marked"}
-                {pageCount > 1 && areas.length > 0 && ` (${pageAreas.length} on this page)`}
+                {confirmed.length === 1 ? " area to redact" : " areas to redact"}
+                {pageCount > 1 && confirmed.length > 0 && ` (${confirmedHere.length} on this page)`}
+                {acceptedCount > 0 && `, ${acceptedCount} accepted from the scan`}
               </span>
             </>
           )}
@@ -412,7 +567,11 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
                 onClick={removeSelected}
                 disabled={selectedId === null || busy !== ""}
               >
-                Remove selection
+                {selectedSuggestion
+                  ? selectedSuggestion.status === ACCEPTED
+                    ? "Undo accept"
+                    : "Reject suggestion"
+                  : "Remove selection"}
               </button>
               <button
                 type="button"
@@ -420,13 +579,13 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
                 onClick={clearAll}
                 disabled={areas.length === 0 || busy !== ""}
               >
-                Clear all
+                Clear drawn boxes
               </button>
               <button
                 type="button"
                 className="btn btn-sm"
                 onClick={previewRedaction}
-                disabled={areas.length === 0 || busy !== ""}
+                disabled={confirmed.length === 0 || busy !== ""}
               >
                 {busy === "preview" ? "Preparing…" : "Preview redaction"}
               </button>
@@ -436,7 +595,7 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
             type="button"
             className="btn btn-sm btn-primary"
             onClick={generate}
-            disabled={areas.length === 0 || busy !== ""}
+            disabled={confirmed.length === 0 || busy !== ""}
           >
             {busy === "download" ? "Generating…" : "Generate redacted copy"}
           </button>
@@ -458,9 +617,12 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
           </>
         ) : (
           <>
-            Drag across the costs or amounts to cover. Click a box to see what is under it,
-            then Remove selection or press Delete. Preview redaction shows the finished copy
-            before you download it — the original entry is not changed.
+            Dashed amber boxes are suggestions from the scan and cover nothing until you
+            accept them; a dotted one was read by OCR off a scanned page, so it is worth
+            checking against the page. Solid white boxes are what will be redacted. Drag
+            across the page to add one by hand, click any box to see what is under it, then
+            press Delete. Preview redaction shows the finished copy before you download it —
+            the original entry is not changed.
           </>
         )}
       </p>
@@ -473,7 +635,13 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
           <FilePreview url={preview.url} fileName={preview.fileName} fill />
         </div>
       ) : (
-        <div className="redact-stage" ref={stageRef}>
+        // Stage and review side by side, and this row is the only thing that
+        // grows. Everything else in the column is fixed height, so the page
+        // keeps its area no matter how many suggestions there are — which is
+        // what went wrong when the review panel lived in the column and
+        // squeezed the document down to a sliver.
+        <div className="redact-main">
+          <div className="redact-stage" ref={stageRef}>
           <div
             className={panning ? "redact-surface redact-surface-panning" : "redact-surface"}
             ref={surfaceRef}
@@ -501,7 +669,46 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
               onError={() => setLoadError("This page could not be rendered.")}
             />
             {!pageLoaded && <p className="redact-loading muted">Rendering page…</p>}
-            {pageAreas.map((area) => (
+
+            {/* Suggestions still waiting on a decision. Under the confirmed
+                boxes in the DOM, so an accepted one drawn over the same spot
+                wins — and translucent either way, so the figure stays
+                readable while it is being judged. */}
+            {pendingHere.map((suggestion) => (
+              <button
+                type="button"
+                key={suggestion.id}
+                className={[
+                  "redact-area redact-area-suggested",
+                  suggestion.source === "ocr" ? "redact-area-suggested-ocr" : "",
+                  suggestion.id === selectedId ? "redact-area-suggested-selected" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                style={{
+                  left: `${suggestion.x * 100}%`,
+                  top: `${suggestion.y * 100}%`,
+                  width: `${suggestion.width * 100}%`,
+                  height: `${suggestion.height * 100}%`,
+                }}
+                title={`${suggestion.label}: ${suggestion.text}${
+                  suggestion.source === "ocr" ? " (read by OCR)" : ""
+                }`}
+                aria-label={`Suggested redaction on page ${pageIndex + 1}: ${suggestion.label}, ${suggestion.text}${
+                  suggestion.source === "ocr" ? ", read by OCR" : ""
+                }. Select to accept or reject.`}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  setSelectedId(suggestion.id);
+                  setDone("");
+                }}
+                // Double-click accepts, for working down a page of figures
+                // without going back to the list for each one.
+                onDoubleClick={() => setSuggestionStatus(suggestion.id, ACCEPTED)}
+              />
+            ))}
+
+            {confirmedHere.map((area) => (
               <button
                 type="button"
                 key={area.id}
@@ -524,6 +731,7 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
                 }}
               />
             ))}
+
             {draft && (
               <div
                 className="redact-area redact-area-draft"
@@ -536,6 +744,30 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
               />
             )}
           </div>
+        </div>
+
+        {/* The review panel, beside the page rather than above it. It scrolls
+            inside itself, so a hundred suggestions cost the document no
+            height at all. */}
+        <SuggestionReview
+          scanning={scanning}
+          scanError={scanError}
+          scan={scan}
+          pending={pending}
+          pendingHere={pendingHere}
+          pendingElsewhere={pendingElsewhere}
+          open={reviewOpen}
+          onToggle={() => setReviewOpen((value) => !value)}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          onAccept={(id) => setSuggestionStatus(id, ACCEPTED)}
+          onReject={(id) => setSuggestionStatus(id, REJECTED)}
+          onAcceptAll={() => decideAll(ACCEPTED)}
+          onRejectAll={() => decideAll(REJECTED)}
+          onGoToPending={goToPending}
+          pageCount={pageCount}
+          busy={busy !== ""}
+        />
         </div>
       )}
 
@@ -597,6 +829,174 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
             </div>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The list of figures the scan turned up, and the accept/reject decisions.
+ *
+ * It shows the current page's undecided suggestions, because that is what the
+ * boxes on screen correspond to — deciding something you cannot see is how a
+ * figure gets covered by accident. Anything waiting on another page is
+ * counted, with a button to jump to it.
+ *
+ * The panel disappears once every suggestion has been decided: at that point
+ * it has nothing left to say, and the page is the only thing worth looking at.
+ */
+function SuggestionReview({
+  scanning,
+  scanError,
+  scan,
+  pending,
+  pendingHere,
+  pendingElsewhere,
+  open,
+  onToggle,
+  selectedId,
+  onSelect,
+  onAccept,
+  onReject,
+  onAcceptAll,
+  onRejectAll,
+  onGoToPending,
+  pageCount,
+  busy,
+}) {
+  if (scanning) {
+    return (
+      <div className="redact-review">
+        <p className="redact-review-note muted">Scanning the document for financial figures…</p>
+      </div>
+    );
+  }
+
+  // A failed scan is worth saying out loud — "no suggestions" and "the scan
+  // did not run" look identical otherwise, and only one of them means the
+  // page can be trusted to be clean.
+  if (scanError) {
+    return (
+      <div className="redact-review">
+        <p className="redact-review-note muted">
+          Automatic detection did not run: {scanError} Mark the areas by hand.
+        </p>
+      </div>
+    );
+  }
+
+  if (!scan) return null;
+
+  // Nothing left to decide. The scan's own message still shows when it had
+  // something to report about what it could not read — a page it could not
+  // reach is worth knowing about long after the list is empty.
+  if (pending.length === 0) {
+    if (!scan.message) return null;
+    return (
+      <div className="redact-review">
+        <p className="redact-review-note muted">{scan.message}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="redact-review">
+      <div className="redact-review-head">
+        <div className="redact-review-title">
+          <strong>{pending.length}</strong>
+          <span className="muted">
+            {pending.length === 1 ? " suggested area" : " suggested areas"} to review
+            {pageCount > 1 && ` — ${pendingHere.length} on this page`}
+          </span>
+        </div>
+        <div className="redact-review-actions">
+          {pendingElsewhere > 0 && (
+            <button type="button" className="btn btn-sm" onClick={onGoToPending} disabled={busy}>
+              {pendingElsewhere} on other pages
+            </button>
+          )}
+          <button type="button" className="btn btn-sm" onClick={onAcceptAll} disabled={busy}>
+            Accept all
+          </button>
+          <button type="button" className="btn btn-sm" onClick={onRejectAll} disabled={busy}>
+            Reject all
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={onToggle}
+            aria-expanded={open}
+            disabled={busy}
+          >
+            {open ? "Hide list" : "Show list"}
+          </button>
+        </div>
+      </div>
+
+      {scan.message && <p className="redact-review-note muted">{scan.message}</p>}
+
+      {open && (
+        <ul className="redact-review-list">
+          {pendingHere.length === 0 ? (
+            <li className="redact-review-empty muted">
+              Nothing left to review on this page.
+            </li>
+          ) : (
+            pendingHere.map((suggestion) => (
+              <li
+                key={suggestion.id}
+                className={
+                  suggestion.id === selectedId
+                    ? "redact-review-item redact-review-item-selected"
+                    : "redact-review-item"
+                }
+              >
+                {/* The row itself highlights the box on the page, so a
+                    suggestion can be located before it is judged. */}
+                <button
+                  type="button"
+                  className="redact-review-pick"
+                  onClick={() => onSelect(suggestion.id)}
+                  title="Highlight this area on the page"
+                >
+                  <span className="redact-review-label">{suggestion.label}</span>
+                  <span className="redact-review-text">{suggestion.text}</span>
+                  {suggestion.source === "ocr" && (
+                    <span
+                      className="redact-review-flag redact-review-flag-ocr"
+                      title="Read by OCR from a scanned page — check it against the page"
+                    >
+                      OCR
+                    </span>
+                  )}
+                  {suggestion.confidence === "medium" && (
+                    <span className="redact-review-flag">unsure</span>
+                  )}
+                </button>
+                <span className="redact-review-decide">
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => onAccept(suggestion.id)}
+                    disabled={busy}
+                    title="Redact this area"
+                  >
+                    Accept
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => onReject(suggestion.id)}
+                    disabled={busy}
+                    title="Leave this area alone"
+                  >
+                    Reject
+                  </button>
+                </span>
+              </li>
+            ))
+          )}
+        </ul>
       )}
     </div>
   );

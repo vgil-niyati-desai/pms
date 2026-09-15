@@ -18,7 +18,7 @@ Two shapes live here:
 """
 
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from bson import ObjectId
@@ -39,14 +39,27 @@ SORTABLE = {
     "employee_code",
     "designation",
     "department",
-    "experience_years",
+    "total_experience_years",
+    "vgil_experience_years",
     "highest_qualification",
     "date_of_joining",
+    "career_start_date",
     "created_at",
     "updated_at",
 }
 DEFAULT_SORT = "-updated_at"
 DATE_FIELDS = {"created_at", "updated_at"}
+
+# Sorting by an experience figure is sorting by the date behind it, backwards:
+# the earlier the start date, the more experience. Doing it this way rather
+# than computing years per document keeps the sort on a plain stored field --
+# it can use an index, it needs no aggregation operator, and it cannot
+# disagree with the number `_serialise` puts on the screen, because both read
+# the same date.
+EXPERIENCE_SORT_SOURCE = {
+    "total_experience_years": "career_start_date",
+    "vgil_experience_years": "date_of_joining",
+}
 
 # The flattened index sorts on its own row shape. `name` ascending is the
 # default the screen opens with.
@@ -75,18 +88,84 @@ def _object_id(employee_id: str) -> ObjectId:
         raise HTTPException(status_code=404, detail="Employee not found")
 
 
-def _serialise(doc: Dict[str, Any]) -> Dict[str, Any]:
-    """Mongo document -> the shape schemas.EmployeeOut expects."""
+# --------------------------------------------------------------------------
+# Experience
+#
+# Two quantities, both derived from a date and neither ever stored:
+#
+#     career_start_date -> Total Professional Experience
+#     date_of_joining   -> Experience with VGIL
+#
+# Computed on read, like a certificate's Valid/Expired status further down, and
+# for the same reason: a stored number is wrong the morning after it is typed,
+# and nobody goes back to correct it. Tenders ask both questions separately
+# ("N years' experience", "a regular employee of the bidder for N years"), so
+# answering one with the other is how a qualified person gets ruled out.
+#
+# DAYS_PER_YEAR is the mean Gregorian year, which absorbs leap years without
+# any calendar arithmetic. The result is displayed to one decimal at most, so
+# the error this could introduce is far below what shows.
+# --------------------------------------------------------------------------
+
+DAYS_PER_YEAR = 365.2425
+
+
+def _years_since(value: Optional[str], today: str) -> Optional[float]:
+    """Whole years and tenths from an ISO date until `today`.
+
+    None when there is no date or it does not parse — which the screens show
+    as a dash. That is the honest answer: "not recorded" is a different thing
+    from "no experience", and a 0.0 in a personnel table reads as the latter.
+
+    A date in the future gives 0.0 rather than a negative: a joining date can
+    legitimately be set ahead for someone starting next month, and they have
+    no experience yet rather than a negative amount of it.
+    """
+    if not value or not str(value).strip():
+        return None
+    try:
+        started = date.fromisoformat(str(value).strip())
+        now = date.fromisoformat(today)
+    except ValueError:
+        return None
+    days = (now - started).days
+    if days <= 0:
+        return 0.0
+    return round(days / DAYS_PER_YEAR, 1)
+
+
+def _serialise(doc: Dict[str, Any], today: Optional[str] = None) -> Dict[str, Any]:
+    """Mongo document -> the shape schemas.EmployeeOut expects.
+
+    This is where the two experience figures are worked out, because it is the
+    one place every read passes through — the list, the detail page, and the
+    response to a create or an update all come back through here, so none of
+    them can drift from the others or go stale.
+    """
     out = {key: value for key, value in doc.items() if not key.startswith("_")}
     out["id"] = str(doc["_id"])
     out.setdefault("cvs", [])
     out.setdefault("certifications", [])
+    on = today or _today_utc()
+    out["total_experience_years"] = _years_since(doc.get("career_start_date"), on)
+    out["vgil_experience_years"] = _years_since(doc.get("date_of_joining"), on)
     return out
 
 
 def _today_utc() -> str:
     """The default 'today' for certificate validity, as an ISO date."""
     return datetime.now(timezone.utc).date().isoformat()
+
+
+def _date_years_ago(years: float, today: str) -> str:
+    """The ISO date `years` before `today`.
+
+    This is what turns an experience filter into a date comparison. "At least
+    10 years' experience" is exactly "started on or before this date", so the
+    bound is resolved once, here, and the query then compares stored ISO
+    strings — no per-document arithmetic, and it works against an index.
+    """
+    return (date.fromisoformat(today) - timedelta(days=years * DAYS_PER_YEAR)).isoformat()
 
 
 def _number_key(field: str) -> Dict[str, Any]:
@@ -120,6 +199,14 @@ def _sort_stages(
     if key not in sortable:
         key, descending = default_key, default_descending
     direction = -1 if descending else 1
+
+    # An experience column is the date behind it, in the opposite direction:
+    # "most experienced first" is "earliest start date first". Swapped here so
+    # the rest of this function, and the blanks-last rule in particular, works
+    # on the stored field exactly as it does for any other text column.
+    if key in EXPERIENCE_SORT_SOURCE:
+        key = EXPERIENCE_SORT_SOURCE[key]
+        direction = -direction
 
     if key in DATE_FIELDS:
         return [], {key: direction, "_id": DESCENDING}
@@ -312,6 +399,11 @@ def list_employees(
     The certifications filter answers "who holds ALL of these?" — the
     question a tender's personnel criteria asks — so it is one clause per
     name, not an $in.
+
+    min_experience/max_experience bound *Total Professional Experience*, the
+    figure a tender's personnel criteria quote. They are years, as before, and
+    are resolved to start-date bounds below. Experience with VGIL is returned
+    on every row and can be sorted on; it has no filter of its own yet.
     """
     query: Dict[str, Any] = {}
     clauses: List[Dict[str, Any]] = []
@@ -329,33 +421,43 @@ def list_employees(
 
     pipeline: List[Dict[str, Any]] = [{"$match": query}]
 
+    # Experience bounds become date bounds. "At least 10 years" is exactly
+    # "started on or before the date 10 years ago", so the arithmetic happens
+    # once here and the query is then a plain comparison of ISO strings —
+    # which is the pattern the certification index already leans on, works
+    # against an index, and cannot drift from the figure `_serialise` shows,
+    # since both are reading the same stored date.
+    #
+    # The bounds invert: a *minimum* number of years is a *maximum* start
+    # date. An employee with no date recorded matches neither, exactly as one
+    # with no experience recorded did not satisfy a numeric range before.
+    today = _today_utc()
+    bounds: Dict[str, Any] = {}
     minimum = _parse_years(min_experience)
     maximum = _parse_years(max_experience)
-    if minimum is not None or maximum is not None:
-        # The bound compares numbers, so the string field is converted first.
-        # A value that doesn't parse becomes null, and null never satisfies a
-        # numeric range — an employee with no experience recorded cannot
-        # satisfy one, exactly as before.
-        bounds: Dict[str, Any] = {}
-        if minimum is not None:
-            bounds["$gte"] = minimum
-        if maximum is not None:
-            bounds["$lte"] = maximum
-        pipeline.append({"$addFields": {"_experience": _number_key("experience_years")}})
-        pipeline.append({"$match": {"_experience": bounds}})
+    if minimum is not None:
+        bounds["$lte"] = _date_years_ago(minimum, today)
+    if maximum is not None:
+        bounds["$gte"] = _date_years_ago(maximum, today)
+    if bounds:
+        pipeline.append(
+            {"$match": {"career_start_date": {**bounds, "$nin": [None, ""]}}}
+        )
 
     totals = list(employees.aggregate(pipeline + [{"$count": "n"}]))
     total = totals[0]["n"] if totals else 0
 
     key_stages, sort_spec = _sort_stages(
-        sort, SORTABLE, "updated_at", True, numeric_fields={"experience_years"}
+        sort, SORTABLE, "updated_at", True, numeric_fields=set()
     )
     pipeline.extend(key_stages)
     pipeline.append({"$sort": sort_spec})
     pipeline.append({"$skip": (page - 1) * page_size})
     pipeline.append({"$limit": page_size})
 
-    items = [_serialise(doc) for doc in employees.aggregate(pipeline)]
+    # One `today` for the whole page, so two rows of the same list can never
+    # be computed against different days.
+    items = [_serialise(doc, today) for doc in employees.aggregate(pipeline)]
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 

@@ -125,6 +125,17 @@ def _existing_path(stored_file_name: Optional[str]) -> str:
     return path
 
 
+def existing_path(stored_file_name: Optional[str]) -> str:
+    """`_existing_path` under a public name, for the automatic detection pass.
+
+    Detection scans the same stored files this module redacts, and the two
+    have to agree on what counts as a usable one -- same 404 for a missing
+    file, same 400 for an unsupported type. Sharing the check is what keeps
+    them from drifting apart; nothing about redaction changes here.
+    """
+    return _existing_path(stored_file_name)
+
+
 def _open_pdf(path: str):
     """Open a PDF for redaction, refusing the cases we cannot handle."""
     pymupdf = _pymupdf()

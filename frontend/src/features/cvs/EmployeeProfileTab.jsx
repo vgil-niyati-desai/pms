@@ -1,15 +1,17 @@
-import { dash, formatTimestamp } from "../../lib/format";
+import { dash, formatExperience, formatTimestamp } from "../../lib/format";
 
 export default function EmployeeProfileTab({ employee }) {
   const fields = [
     ["Employee code", dash(employee.employee_code)],
     ["Designation", dash(employee.designation)],
     ["Department", dash(employee.department)],
+    // The two experience figures sit next to the dates they are worked out
+    // from, so a number that looks wrong can be traced to the date behind it
+    // without opening the edit form.
+    ["Career start", dash(employee.career_start_date)],
+    ["Total Professional Experience", formatExperience(employee.total_experience_years)],
     ["Date of joining", dash(employee.date_of_joining)],
-    [
-      "Total experience",
-      dash(employee.experience_years) === "—" ? "—" : `${employee.experience_years} yrs`,
-    ],
+    ["Experience with VGIL", formatExperience(employee.vgil_experience_years)],
     ["Highest qualification", dash(employee.highest_qualification)],
     ["Email", dash(employee.email)],
     ["Phone", dash(employee.phone)],

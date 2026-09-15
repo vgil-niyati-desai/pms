@@ -19,7 +19,7 @@ import {
   listDepartments,
   listCertificationNames,
 } from "../../api/employees";
-import { dash, formatTimestamp } from "../../lib/format";
+import { dash, formatExperience, formatTimestamp } from "../../lib/format";
 import { latestCvDate, certificationSummary } from "./employeeFields";
 import CertificationsView from "./CertificationsView";
 import { paths } from "../../app/routes";
@@ -109,7 +109,9 @@ export default function EmployeesListPage() {
     })),
     (values.minExperience !== "" || values.maxExperience !== "") && {
       key: "experience",
-      label: `Experience: ${values.minExperience || "0"}–${values.maxExperience || "any"} yrs`,
+      // The bound is on total career experience, which is what a tender
+      // quotes; naming it avoids reading as the VGIL column beside it.
+      label: `Total experience: ${values.minExperience || "0"}–${values.maxExperience || "any"} yrs`,
       onRemove: () => setFilter({ minExperience: "", maxExperience: "" }),
     },
   ].filter(Boolean);
@@ -130,13 +132,20 @@ export default function EmployeesListPage() {
       header: sortHeader("department", "Department"),
       render: (employee) => dash(employee.department),
     },
+    // Two columns, because they are two different answers and a tender asks
+    // for them separately. Both sort on the date behind them, so the order is
+    // exact even though the figure shown is rounded.
     {
-      key: "experience_years",
-      header: sortHeader("experience_years", "Experience"),
+      key: "total_experience_years",
+      header: sortHeader("total_experience_years", "Total Professional Experience"),
       className: "cell-tight",
-      render: (employee) =>
-        // dash() covers "" and the nulls open-ended records may hold.
-        dash(employee.experience_years) === "—" ? "—" : `${employee.experience_years} yrs`,
+      render: (employee) => formatExperience(employee.total_experience_years),
+    },
+    {
+      key: "vgil_experience_years",
+      header: sortHeader("vgil_experience_years", "Experience with VGIL"),
+      className: "cell-tight",
+      render: (employee) => formatExperience(employee.vgil_experience_years),
     },
     {
       key: "cvs",
@@ -234,12 +243,16 @@ export default function EmployeesListPage() {
               </FilterMenu>
             )}
 
+            {/* Bounds total career experience, the figure a tender's personnel
+                criteria quote. Still entered in years: the backend resolves
+                them to start-date bounds, so the filter keeps working as the
+                years tick up without anyone re-saving a record. */}
             <FilterMenu
-              label="Experience"
+              label="Total experience"
               count={values.minExperience !== "" || values.maxExperience !== "" ? 1 : 0}
             >
               <FormRow>
-                <Field label="Experience from" htmlFor="filter-min-exp">
+                <Field label="Total experience from" htmlFor="filter-min-exp">
                   <input
                     id="filter-min-exp"
                     type="number"

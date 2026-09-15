@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
-from datetime import datetime
+from datetime import date, datetime
 
 
 class DocumentFields(BaseModel):
@@ -159,10 +159,23 @@ class ProjectPage(BaseModel):
 class EmployeeFields(BaseModel):
     """The fields the employee form owns.
 
-    experience_years stays a string, like contract_value on a project: it is
-    what the <input> produces, and screens display it rather than compute
-    with it. The one thing checked here is that a value that *does* parse is
-    not negative, mirroring the form's own check.
+    Experience is held as two *dates*, never as a count of years:
+
+        career_start_date  -> Total Professional Experience
+        date_of_joining    -> Experience with VGIL
+
+    A typed number would be wrong the day after it was typed, and the two
+    quantities are genuinely different -- someone who joined VGIL in 2021
+    after seven years elsewhere has four years with VGIL and eleven in total.
+    Conflating them understates every experienced hire against a tender's
+    personnel criteria, which is the one thing these records exist to answer.
+    The years are computed at read time in the router, so they are right on
+    the day they are read and need no upkeep.
+
+    experience_years is the field those two replaced. It is kept so that
+    anything already stored survives a round trip, and it is deliberately NOT
+    the source of truth for anything: nothing computes from it and no screen
+    shows it.
     """
 
     # full_name is enforced for the same reason a project's title is: it is
@@ -172,7 +185,12 @@ class EmployeeFields(BaseModel):
     employee_code: Optional[str] = None
     designation: Optional[str] = None
     department: Optional[str] = None
+    # The day they joined VGIL, and the day their professional career began.
+    # Both ISO (YYYY-MM-DD), which is what <input type="date"> produces and
+    # what sorts and compares correctly as a plain string.
     date_of_joining: Optional[str] = None
+    career_start_date: Optional[str] = None
+    # Superseded by the two dates above. See the class docstring.
     experience_years: Optional[str] = None
     highest_qualification: Optional[str] = None
     key_skills: Optional[str] = None
@@ -184,6 +202,29 @@ class EmployeeFields(BaseModel):
     @classmethod
     def _check_name(cls, value: str) -> str:
         return _required(value, "Full name")
+
+    @field_validator("date_of_joining", "career_start_date")
+    @classmethod
+    def _check_date(cls, value: Optional[str]) -> Optional[str]:
+        """An experience date has to be a real ISO date, or absent.
+
+        Stricter than the fields it replaces, and deliberately so: these two
+        are no longer text someone reads off the screen, they are what the
+        displayed years are *calculated* from. A value that does not parse
+        would silently produce no experience at all rather than a wrong one,
+        which is the kind of blank nobody investigates.
+
+        A future date is allowed — a joining date can legitimately be set for
+        someone starting next month — and simply reads as no experience yet.
+        """
+        if value is None or str(value).strip() == "":
+            return value
+        text = str(value).strip()
+        try:
+            date.fromisoformat(text)
+        except ValueError:
+            raise ValueError("Dates must be in YYYY-MM-DD form.")
+        return text
 
     @field_validator("experience_years")
     @classmethod
@@ -253,9 +294,22 @@ class CertificationOut(CertificationIn):
 
 class EmployeeOut(EmployeeFields):
     """What every employee endpoint returns: the record with both of its
-    nested collections, which is the shape every screen was built around."""
+    nested collections, which is the shape every screen was built around.
+
+    The two experience figures are *derived*, never stored. They are computed
+    from the dates above each time a record is read, so they are correct on
+    the day they are read and nobody has to remember to revise them. Both are
+    null when the date behind them is missing, which the screens show as a
+    dash — an honest "not recorded" rather than a zero that reads as "none".
+    """
 
     id: str
+    # Years since career_start_date. What a tender means by "shall have N
+    # years' experience".
+    total_experience_years: Optional[float] = None
+    # Years since date_of_joining. What a tender means by "shall have been a
+    # regular employee of the bidder for N years".
+    vgil_experience_years: Optional[float] = None
     cvs: List[CvOut] = Field(default_factory=list)
     certifications: List[CertificationOut] = Field(default_factory=list)
     created_at: datetime
@@ -480,3 +534,69 @@ class RedactionSource(BaseModel):
     kind: str
     file_name: Optional[str] = None
     pages: List[RedactionPage]
+
+
+# ---------------------------------------------------------------------------
+# Automatic detection of sensitive figures
+#
+# A suggestion, never a redaction. The scan reads the stored file and returns
+# rectangles in the *same* normalised format as RedactionArea above, so a box
+# the user accepts is posted to /redacted-copy exactly as a hand-drawn one is.
+# Nothing here is stored, and the document is not modified by looking at it.
+# ---------------------------------------------------------------------------
+
+
+class SensitiveDetection(BaseModel):
+    """One figure the scan thinks should probably be covered.
+
+    The geometry is a RedactionArea in all but name -- deliberately, so the
+    review UI can draw a suggestion and a manual box on the same surface and
+    the redaction endpoint cannot tell which was which. The rest is review
+    material: what was matched, what to call it, and how sure the rule was.
+    """
+
+    id: str
+    page: int = Field(ge=0)
+    x: float
+    y: float
+    width: float = Field(gt=0)
+    height: float = Field(gt=0)
+    category: str
+    label: str
+    text: str
+    confidence: str
+    rule: str
+    # "text" or "ocr" -- how the words under this box were read. A figure
+    # Tesseract lifted off a scan is worth checking against the page in a way
+    # one taken from a content stream is not, and the reviewer can only make
+    # that call if the suggestion says which it was.
+    source: str = "text"
+
+
+class SensitiveScan(BaseModel):
+    """Everything one pass over a document found, and what it could not read.
+
+    Reading is per page, so the report is too. A PDF can be text throughout,
+    scanned throughout, or a mix of the two, and `text_pages` / `ocr_pages`
+    say which page went which way -- an OCR'd page's suggestions are worth a
+    closer look than a text page's, and the reviewer can only know that if it
+    is said.
+
+    `pages_without_text` and `pages_skipped` are the honest part: a page that
+    could not be read, or that OCR never got to, is reported as such rather
+    than folded into an empty result that would read as "nothing sensitive
+    here". `engine` is "text", "ocr", "mixed" or "none" for the document as a
+    whole.
+    """
+
+    kind: str
+    engine: str
+    ocr_available: bool
+    detections: List[SensitiveDetection]
+    pages_scanned: int
+    text_pages: List[int] = []
+    ocr_pages: List[int] = []
+    pages_without_text: List[int]
+    pages_skipped: List[int] = []
+    truncated: bool
+    message: Optional[str] = None

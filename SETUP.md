@@ -249,6 +249,42 @@ hold, and which CV version to attach. They live in an `employees` collection
 (set by `MONGO_EMPLOYEES_COLLECTION` in `.env`), created automatically on
 first save like the others.
 
+### Experience is two figures, and neither is typed in
+
+A tender asks two different questions — "shall have N years' experience" and
+"shall have been a regular employee of the bidder for N years" — and answering
+one with the other rules out people who actually qualify. So the form collects
+two **dates** and the API derives two figures from them on every read:
+
+| Stored (entered once) | Returned (recalculated on read) | Shown as |
+| --- | --- | --- |
+| `career_start_date` | `total_experience_years` | **Total Professional Experience** |
+| `date_of_joining` | `vgil_experience_years` | **Experience with VGIL** |
+
+Nothing stores a number of years. A typed "7" is right the day it is typed and
+wrong every day after, and nobody goes back to revise it; a date stays true and
+the years look after themselves. Both figures come back `null` — shown as a
+dash, not a zero — when the date behind them is missing, because "not recorded"
+and "none" are different answers and only one of them needs chasing up.
+
+`experience_years`, the old single typed number, is no longer the source of
+truth for anything: nothing computes from it and no screen shows it. It is
+still accepted and stored so that anything already recorded survives a round
+trip.
+
+`min_experience` / `max_experience` on the list bound **total** experience,
+still in years — the API resolves them to start-date bounds, so the filter goes
+on working as the years tick up without anyone re-saving a record. Both figures
+are sortable (`total_experience_years`, `vgil_experience_years`); each sorts on
+the date behind it, so the ordering is exact even though the figure displayed is
+rounded to the "7+ yrs" form the CVs use.
+
+The dates must be ISO (`YYYY-MM-DD`) or the API returns 422. That is stricter
+than the free-text fields around them, deliberately: these two are what a
+displayed figure is *calculated* from, and a value that silently failed to parse
+would show no experience at all rather than a wrong one — the kind of blank
+nobody investigates.
+
 ```
 GET    /employees/            one page: filter, sort, search, page
 POST   /employees/            create                              -> 201
@@ -414,6 +450,86 @@ before the PMS is distributed to anyone outside.
 `verify_mongo.py` covers all of the above, including that the selected text is
 gone from the copy's decompressed page content and that the stored original is
 byte-for-byte unchanged.
+
+## 3f. What automatic detection added
+
+Opening the redactor now also **scans the document for financial figures** —
+contract values, prices, rates, fees, totals, EMD, quoted amounts — and offers
+them as *suggested* areas. They are proposals only: a dashed amber box covers
+nothing until you accept it, and an accepted one becomes an ordinary redaction
+area and goes through the same **Generate redacted copy** as a hand-drawn one.
+Reject leaves it alone. You can still draw boxes by hand at any point, and the
+original file is never touched — the scan endpoint only reads.
+
+The review panel above the page lists what was found, with **Accept** /
+**Reject** per figure and **Accept all** / **Reject all**. A suggestion marked
+*unsure* came from the one rule that does not claim certainty (a grouped number
+with no label or currency symbol near it).
+
+### OCR (needed for scans and images)
+
+Detection reads each **page** the best way it can:
+
+| Document | How it is read |
+| --- | --- |
+| Normal text PDF | the PDF's own text layer |
+| Scanned PDF | OCR |
+| Mixed PDF | per page — text layer where there is one, OCR where there is not |
+| JPG / PNG | OCR |
+
+**OCR needs nothing installed.** `pip install -r requirements.txt` is the whole
+setup, on Windows and on Linux alike.
+
+That is not the usual arrangement with Tesseract, so it is worth stating why:
+PyMuPDF's wheels carry **Tesseract and Leptonica linked into MuPDF's own shared
+library**, so OCR runs inside the API process. There is no Tesseract executable
+to install, nothing needs to be on `PATH`, and no global `TESSDATA_PREFIX` is
+set — the backend passes an explicit path on every call, which PyMuPDF uses
+verbatim without touching the environment.
+
+The only thing OCR needs from outside the process is the language data, and the
+project ships its own copy:
+
+```
+backend/ocr/tessdata/eng.traineddata
+```
+
+**This is what makes the PMS deployable to a shared server.** No root access is
+required, nothing is installed system-wide, and other projects on the same
+machine are neither affected nor depended on — the backend prefers its own copy
+even on a machine that has a Tesseract of its own, so a system upgrade
+elsewhere cannot change what this app reads.
+
+To point somewhere else — a shared volume, or an extra language — set
+`PMS_TESSDATA_DIR` in `backend/.env` to a folder holding the `.traineddata`
+files. Deliberately not `TESSDATA_PREFIX`, which is global to every Tesseract
+on the machine. The lookup order is: `PMS_TESSDATA_DIR`, the project's own
+copy, `TESSDATA_PREFIX`, then any system install.
+
+**If the language data is missing the app still runs and the text-PDF path
+still works.** Scanned pages and images are then reported as unread, with a
+message saying so — deliberately, because a scan that came back with no
+suggestions would otherwise look exactly like a page with nothing sensitive on
+it. To check what a running backend resolved, from the backend folder:
+
+```powershell
+.\venv\Scripts\python.exe -c "from app import detection; print(detection.tessdata_dir())"
+```
+
+On the server, the same thing with that machine's interpreter. It should print
+the path to `backend/ocr/tessdata`.
+
+A suggestion read by OCR is marked **OCR** in the list and drawn with a dotted
+outline rather than a dashed one, because OCR is a guess about pixels in a way
+reading a content stream is not — those are the ones worth checking against
+the page before accepting. OCR runs at 300 DPI (about 0.4s per page here), and
+one pass OCRs at most 40 pages; any beyond that are reported as not scanned
+rather than left to hang the request.
+
+`verify_mongo.py` covers every format above — text PDF, scanned PDF, mixed PDF,
+JPG, PNG and rotated pages — checking that the figures are found, that the
+suggested boxes sit on actual ink, and that accepting them blanks exactly those
+pixels and nothing else.
 
 ## 4. PDF splitter (optional, separate from the app)
 
