@@ -20,13 +20,12 @@ export const paths = {
   tender: (id) => `/tenders/${id}`,
   editTender: (id) => `/tenders/${id}/edit`,
 
-  // The original single-screen document log. Not one of the three areas, so
-  // it is reachable by URL and from the Projects screen rather than the
-  // sidebar, and stays working until Projects replaces it.
+  // The original single-screen document log, now the fourth area in the
+  // sidebar rather than a screen reached only by URL.
   documents: () => "/documents",
 };
 
-/** The three areas, in sidebar order. */
+/** The four areas, in sidebar order. */
 export const AREAS = [
   {
     key: "projects",
@@ -45,6 +44,14 @@ export const AREAS = [
     label: "Tenders",
     path: paths.tenders(),
     action: { label: "+ New Tender", path: paths.newTender(), available: true },
+  },
+  // No action: the document log captures a new entry through the form on the
+  // page itself, so there is no separate route for the topbar button to go
+  // to. AppShell renders the button only for an area that has one.
+  {
+    key: "documents",
+    label: "Documents",
+    path: paths.documents(),
   },
 ];
 

@@ -14,14 +14,29 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import FileResponse
-from pymongo import DESCENDING, ReturnDocument
+from pymongo import ReturnDocument
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
 from .. import detection, redaction, schemas, storage
-from ..mongodb import get_documents
+from ..mongodb import (
+    get_documents,
+    get_employee_records,
+    get_project_records,
+    get_tender_records,
+)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+# What the document log can be ordered by. Every one except created_at is a
+# string, stored as typed (dates as ISO text, which sorts correctly as text).
+SORTABLE = {"created_at", "document_date", "document_type", "client_name", "project_title"}
+DEFAULT_SORT = "-created_at"
+
+# The same page size ceiling the other lists use, so a hand-edited URL cannot
+# ask for the whole log in one response.
+DEFAULT_PAGE_SIZE = 25
+MAX_PAGE_SIZE = 200
 
 
 def _now_utc_ms() -> datetime:
@@ -47,6 +62,27 @@ def _serialise(doc: Dict[str, Any]) -> Dict[str, Any]:
     out = {key: value for key, value in doc.items() if key != "_id"}
     out["id"] = str(doc["_id"])
     return out
+
+
+# The projects router serves a project's own documents and needs the same
+# shape back. Exported rather than duplicated, so the two can never drift.
+serialise_document = _serialise
+
+
+def _require_project(projects: Collection, project_id: str) -> ObjectId:
+    """Parse and check a project id supplied with an upload, or 404.
+
+    Checked before anything is written, so a bad project id cannot leave a
+    file on disk or a document record pointing at a project that is not
+    there.
+    """
+    try:
+        oid = ObjectId(project_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not projects.find_one({"_id": oid}, {"_id": 1}):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return oid
 
 
 def backfill_file_hashes(collection: Collection) -> int:
@@ -147,9 +183,21 @@ def create_document(
     department: Optional[str] = Form(None),
     submitted_by: Optional[str] = Form(None),
     notes: Optional[str] = Form(None),
+    project_id: Optional[str] = Form(None),
     document_file: Optional[UploadFile] = File(None),
     documents: Collection = Depends(get_documents),
+    projects: Collection = Depends(get_project_records),
 ):
+    """Log a document, optionally as one belonging to a project.
+
+    Supplying project_id both stamps the document and adds it to that
+    project's document_ids, so one request leaves the two representations
+    agreeing. Omitting it is the standalone case -- the document log is
+    shared with the CV and tender screens, whose uploads belong to no
+    project at all.
+    """
+    project_oid = _require_project(projects, project_id) if project_id else None
+
     stored_file_name = None
     original_file_name = None
     file_hash = None
@@ -174,6 +222,15 @@ def create_document(
         "file_name": original_file_name,
         "stored_file_name": stored_file_name,
         "file_hash": file_hash,
+        "project_id": project_id or None,
+        # Set from the employee side, by the CV and certification endpoints
+        # in routers/employees_mongo.py. Present from the start so "belongs
+        # to no employee" is recorded rather than merely absent.
+        "employee_id": None,
+        # Set from the tender side, by the attach endpoint in
+        # routers/tenders_mongo.py. Present from the start for the same
+        # reason as employee_id above.
+        "tender_id": None,
         # Supplied by the application rather than the server, always in
         # UTC. Rounded to milliseconds because that is all BSON stores --
         # without this the timestamp in the create response would not match
@@ -191,16 +248,77 @@ def create_document(
         raise _duplicate_error(documents, file_hash)
 
     record["_id"] = result.inserted_id
+
+    if project_oid is not None:
+        # $addToSet, so this staying in step with an explicit link call
+        # from the client is a no-op rather than a duplicate entry.
+        projects.update_one(
+            {"_id": project_oid},
+            {
+                "$addToSet": {"document_ids": str(result.inserted_id)},
+                "$set": {"updated_at": _now_utc_ms()},
+            },
+        )
+
     return _serialise(record)
 
 
-@router.get("/", response_model=List[schemas.DocumentMongoOut])
+def _sort_stages(sort: str) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """The (stages before the sort, sort spec) for one sort option.
+
+    The rules the projects list sorts by: blanks last whichever way the arrow
+    points, text compared case-insensitively, and `_id` breaking every tie so
+    paging never shows a row twice or skips one. An unknown key falls back to
+    newest first rather than failing the request.
+    """
+    descending = sort.startswith("-")
+    key = sort.lstrip("-")
+    if key not in SORTABLE:
+        descending, key = True, "created_at"
+    direction = -1 if descending else 1
+
+    if key == "created_at":
+        return [], {"created_at": direction, "_id": direction}
+
+    value = {"$ifNull": [f"${key}", ""]}
+    stages = [
+        {
+            "$addFields": {
+                "_sort_blank": {"$cond": [{"$eq": [value, ""]}, 1, 0]},
+                "_sort_key": {"$toLower": value},
+            }
+        }
+    ]
+    return stages, {"_sort_blank": 1, "_sort_key": direction, "_id": direction}
+
+
+@router.get("/types", response_model=List[str])
+def list_document_types(documents: Collection = Depends(get_documents)):
+    """Every document type in use, for the log's type filter and form.
+
+    Read from the data rather than a fixed list, because the log holds the
+    types every area writes -- CVs, receipts, tender papers, imported
+    entries -- not only the ones the Documents form offers.
+    """
+    values = documents.distinct("document_type")
+    return sorted({v for v in values if isinstance(v, str) and v.strip()}, key=str.lower)
+
+
+@router.get("/", response_model=schemas.DocumentPage)
 def list_documents(
     document_type: Optional[str] = None,
     category: Optional[str] = None,
     q: Optional[str] = None,
+    sort: str = DEFAULT_SORT,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     documents: Collection = Depends(get_documents),
 ):
+    """One page of the document log, filtered and sorted.
+
+    The count is taken against the same filter as the page, so the pager and
+    the rows can never disagree about how many results there are.
+    """
     query: Dict[str, Any] = {}
 
     if document_type:
@@ -218,10 +336,21 @@ def list_documents(
             {"reference_number": pattern},
         ]
 
-    # _id breaks ties: ObjectIds are time-ordered, so two entries saved in
-    # the same instant still come back newest-first, not in arbitrary order.
-    cursor = documents.find(query).sort([("created_at", DESCENDING), ("_id", DESCENDING)])
-    return [_serialise(doc) for doc in cursor]
+    key_stages, sort_spec = _sort_stages(sort)
+    pipeline: List[Dict[str, Any]] = [{"$match": query}, *key_stages]
+    pipeline.append({"$sort": sort_spec})
+    pipeline.append({"$skip": (page - 1) * page_size})
+    pipeline.append({"$limit": page_size})
+    # The computed sort keys are working state, not part of the document.
+    pipeline.append({"$project": {"_sort_blank": 0, "_sort_key": 0}})
+
+    records = list(documents.aggregate(pipeline))
+    return {
+        "items": [_serialise(doc) for doc in records],
+        "total": documents.count_documents(query),
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.get("/{document_id}", response_model=schemas.DocumentMongoOut)
@@ -398,6 +527,11 @@ def update_document(
             document_file, documents, exclude_id=oid
         )
 
+    # project_id is deliberately absent from this dict. An edit changes what
+    # a document says, not whose it is; attaching and detaching are their own
+    # endpoints. Listing it here would also mean a form that does not send it
+    # -- which is every form the app has -- silently detaching the document
+    # on every save while the project's document_ids still pointed at it.
     changes: Dict[str, Any] = {
         "document_type": document_type,
         "category": category,
@@ -439,15 +573,92 @@ def update_document(
 
 
 @router.delete("/{document_id}", status_code=204)
-def delete_document(document_id: str, documents: Collection = Depends(get_documents)):
-    """Delete the record, then its stored file.
+def delete_document(
+    document_id: str,
+    documents: Collection = Depends(get_documents),
+    projects: Collection = Depends(get_project_records),
+    employees: Collection = Depends(get_employee_records),
+    tenders: Collection = Depends(get_tender_records),
+):
+    """Delete the record, its references, then its stored file.
 
     The database document goes first so a failed file delete can never leave
     a live record pointing at a file that is no longer there.
+
+    Any project listing the document is then cleared of it. Without that a
+    delete from anywhere other than a project's own drawer -- the document
+    log screen, say -- left the id behind in document_ids, pointing at
+    nothing. update_many rather than update_one because the field is an
+    array on every project and more than one may reference it.
+
+    The employee side is cleared the same way but not by the same means. A
+    project references a document from a list, so the id is pulled out of it;
+    a CV version or a certification *is* a record, which keeps its dates, its
+    label and its place in the person's history whether or not the file
+    behind it still exists. So the record stays and only the pointer is
+    cleared -- along with file_name, which is a copy of a name that no longer
+    resolves and would otherwise show as a file that cannot be opened.
     """
     record = documents.find_one_and_delete({"_id": _object_id(document_id)})
     if not record:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    projects.update_many(
+        {"document_ids": document_id},
+        {
+            "$pull": {"document_ids": document_id},
+            "$set": {"updated_at": _now_utc_ms()},
+        },
+    )
+
+    # A tender holds its documents in a list, exactly as a project does, so
+    # it is cleared the same way. Without this a document deleted from the
+    # log left its id behind in document_ids, pointing at nothing -- which is
+    # what the tender screen then tried to show.
+    tenders.update_many(
+        {"document_ids": document_id},
+        {
+            "$pull": {"document_ids": document_id},
+            "$set": {"updated_at": _now_utc_ms()},
+        },
+    )
+
+    # A tender's nested records point at a document the way a CV does, and
+    # are cleared the way a CV is: the cost item keeps its amount, its
+    # payment mode and its instrument number whether or not the receipt
+    # behind it still exists, so the record stays and only the pointer goes.
+    # These files are deliberately not the tender's *documents* -- the
+    # Documents tab holds what the bid was filed with, not what it cost --
+    # so they are reached from here and not through document_ids.
+    for field in ("cost_items", "certificates"):
+        tenders.update_many(
+            {f"{field}.document_id": document_id},
+            {
+                "$set": {
+                    f"{field}.$[item].document_id": None,
+                    f"{field}.$[item].file_name": None,
+                    "updated_at": _now_utc_ms(),
+                }
+            },
+            array_filters=[{"item.document_id": document_id}],
+        )
+
+    # Both nested arrays, because either kind of record can point at this
+    # document. The positional filter updates every matching element, not
+    # just the first -- one employee can hold two CV versions of the same
+    # file only by pointing both at it, and both have to be cleared.
+    for field in ("cvs", "certifications"):
+        employees.update_many(
+            {f"{field}.document_id": document_id},
+            {
+                "$set": {
+                    f"{field}.$[item].document_id": None,
+                    f"{field}.$[item].file_name": None,
+                    "updated_at": _now_utc_ms(),
+                }
+            },
+            array_filters=[{"item.document_id": document_id}],
+        )
 
     storage.remove_stored_file(record.get("stored_file_name"))
     return Response(status_code=204)

@@ -131,9 +131,9 @@ export default function TenderCostsTab({
 
       <section className="card">
         <div className="list-head">
-          <h3>Certificates ({tender.certificates.length})</h3>
+          <h3>Submitted certificates ({tender.certificates.length})</h3>
           <button type="button" className="btn btn-primary" onClick={() => onAddCertificate()}>
-            + Add certificate
+            + Add submitted certificate
           </button>
         </div>
 

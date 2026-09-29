@@ -487,7 +487,11 @@ def main_offline():
 
     print("Mode: offline — in-memory MongoDB stand-in (mongomock)")
     print("  (a few checks need a real server; those are marked SKIP)\n")
-    database = mongomock.MongoClient()["verify"]
+    from verify_offline import install
+
+    # The app's own client becomes this in-memory one, so startup and any
+    # collection not overridden below cannot reach the database in .env.
+    database = install(mongomock.MongoClient())["verify"]
     run_suite(database["employees"], database["documents"], offline=True)
     return 0
 

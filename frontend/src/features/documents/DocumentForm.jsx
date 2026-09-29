@@ -1,10 +1,10 @@
-import { useState, useRef, useEffect } from "react";
-import { createDocument, updateDocument } from "../../api/documents";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { createDocument, listDocumentTypes, updateDocument } from "../../api/documents";
 import Field from "../../components/Field";
 import FormRow from "../../components/FormRow";
 import FileUpload from "../../components/FileUpload";
-
-const DOCUMENT_TYPES = ["LOI", "Work Order", "Completion Certificate", "Purchase Order", "Contract"];
+import useResource from "../../hooks/useResource";
+import { documentTypeOptions } from "./documentTypes";
 
 const EMPTY_FORM = {
   document_type: "",
@@ -43,6 +43,13 @@ export default function DocumentForm({ onSaved, editingDocument, onCancelEdit })
   const formRef = useRef(null);
 
   const isEditing = Boolean(editingDocument);
+
+  // Every type the log holds, and always the entry's own: a CV, a receipt or
+  // an imported entry used to open with a blank type, because the picker only
+  // offered the five project evidence types.
+  const loadTypes = useCallback(() => listDocumentTypes(), []);
+  const types = useResource(loadTypes, { initialData: [] });
+  const typeOptions = documentTypeOptions(types.data, form.document_type);
   const editingId = editingDocument ? editingDocument.id : null;
 
   // Load the selected entry into the form (or reset it when editing stops).
@@ -119,9 +126,7 @@ export default function DocumentForm({ onSaved, editingDocument, onCancelEdit })
     : null;
 
   return (
-    <form className="card form" onSubmit={handleSubmit} ref={formRef}>
-      <h2>{isEditing ? `Edit Entry #${editingId}` : "Add Entry"}</h2>
-
+    <form onSubmit={handleSubmit} ref={formRef}>
       {error && <div className="alert alert-error">{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
 
@@ -129,7 +134,7 @@ export default function DocumentForm({ onSaved, editingDocument, onCancelEdit })
         <Field label="Document type *" htmlFor="document_type">
           <select id="document_type" name="document_type" value={form.document_type} onChange={handleChange}>
             <option value="">Select type</option>
-            {DOCUMENT_TYPES.map((t) => (
+            {typeOptions.map((t) => (
               <option key={t} value={t}>{t}</option>
             ))}
           </select>
@@ -197,11 +202,9 @@ export default function DocumentForm({ onSaved, editingDocument, onCancelEdit })
             ? isEditing ? "Updating..." : "Saving..."
             : isEditing ? "Update entry" : "Save entry"}
         </button>
-        {isEditing && (
-          <button type="button" className="btn" onClick={onCancelEdit} disabled={submitting}>
-            Cancel
-          </button>
-        )}
+        <button type="button" className="btn" onClick={onCancelEdit} disabled={submitting}>
+          Cancel
+        </button>
       </div>
     </form>
   );

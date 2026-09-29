@@ -424,6 +424,70 @@ def _check_rotation(client, collection, rotation):
               "the unconverted box still landed on ink, so this proves nothing")
 
     doc.close()
+
+    # The boxes landing on the rendered figure is half of it; the copy is the
+    # other half. The redaction side has to turn those display-space boxes
+    # back into unrotated page space, or it blanks a patch of empty paper and
+    # the figure the reviewer marked is still in the downloaded file.
+    areas = [{"page": d["page"], "x": d["x"], "y": d["y"],
+              "width": d["width"], "height": d["height"]} for d in spots]
+    res = client.post(f"/documents/{entry['id']}/redacted-copy", json={"areas": areas})
+    if check(f"a /Rotate {rotation} page's suggestions POST to /redacted-copy -> 200",
+             res.status_code == 200, res.text):
+        copied = pymupdf.open(stream=res.content, filetype="pdf")
+        text = copied[0].get_text()
+        streams = copied[0].read_contents().decode("latin-1")
+        copied.close()
+        for secret in DETECT_SECRETS:
+            check(f"the /Rotate {rotation} copy has {secret!r} removed, not covered",
+                  secret not in text and secret not in streams, repr(text[:80]))
+        for kept in DETECT_KEEP:
+            check(f"the /Rotate {rotation} copy leaves {kept!r} alone",
+                  kept in text, repr(text[:120]))
+
+    client.delete(f"/documents/{entry['id']}")
+
+
+# Words that end in a currency code's letters, each followed by a number.
+# Matched case-blind with nothing guarding the letters, "Rs" is the tail of
+# "years" and "hours", and every one of these came back as a sure amount.
+WORD_ENDING_LINES = [
+    "Experience of 12 years 2019 onwards",
+    "Logged 40 hours 1500 times",
+    "Committee members 12 present",
+    "Delivered 500 Saree pieces",
+]
+# ...while a code that stands as a word of its own is still money.
+WORD_ENDING_CURRENCY = ("Rs.50,000/-", "rs 1200", "500Rs", "INR 45 lakh")
+
+
+def _check_currency_word_boundaries(client):
+    """A currency code is only one when it is a word, not part of one."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    y = 100
+    for line in WORD_ENDING_LINES + list(WORD_ENDING_CURRENCY):
+        page.insert_text((72, y), line, fontsize=12)
+        y += 40
+    content = doc.tobytes()
+    doc.close()
+
+    res = _post_detect_pdf(client, "word_endings.pdf", content, "Word Ending Check")
+    if not check("POST a PDF of currency-like word endings -> 201",
+                 res.status_code == 201, res.text):
+        return
+    entry = res.json()
+    res = client.get(f"/documents/{entry['id']}/redaction/suggestions")
+    found = (res.json().get("detections") or []) if res.status_code == 200 else []
+    matched = " | ".join(d["text"] for d in found)
+    for line in WORD_ENDING_LINES:
+        check(f"nothing in {line!r} is suggested",
+              not any(d["text"] in line for d in found), matched)
+    for figure in WORD_ENDING_CURRENCY:
+        check(f"{figure!r} is still suggested as money",
+              any(figure in d["text"] for d in found), matched)
     client.delete(f"/documents/{entry['id']}")
 
 
@@ -511,9 +575,10 @@ def run_detection_suite(client, collection, id_without_file):
     check("a page number is not suggested",
           not any(d["text"].strip() in ("3", "12", "Page 3", "3 of 12") for d in found), matched)
     check("a bare year is not suggested", "2024" not in matched, matched)
+    _check_currency_word_boundaries(client)
 
     # --- rotation -----------------------------------------------------------
-    for rotation in (90, 270):
+    for rotation in (90, 180, 270):
         _check_rotation(client, collection, rotation)
 
     # --- a document with no text ------------------------------------------
@@ -1255,6 +1320,11 @@ def run_suite(collection):
 
     # Point both the request path and the startup path at this collection.
     main.app.dependency_overrides[mongodb.get_documents] = lambda: collection
+    # DELETE /documents/{id} now also clears the reference a tender holds, so
+    # the tenders collection is pointed at this suite's own database too.
+    main.app.dependency_overrides[mongodb.get_tender_records] = (
+        lambda: collection.database["tenders"]
+    )
     mongodb.get_collection = lambda: collection
     mongodb.ping = lambda: (True, None)
 
@@ -1389,27 +1459,75 @@ def run_suite(collection):
               client.get("/documents/0123456789abcdef01234567").status_code == 404)
 
         # --- list, filter, search ---------------------------------------
-        rows = client.get("/documents/").json()
-        check("GET /documents/ lists both entries", len(rows) == 2, str(len(rows)))
+        def ids(url):
+            return [r["id"] for r in client.get(url).json()["items"]]
+
+        listing = client.get("/documents/").json()
+        rows = listing["items"]
+        check("GET /documents/ lists both entries",
+              len(rows) == 2 and listing["total"] == 2, str(listing))
         check("list is newest-first",
               rows[0]["id"] == withfile["id"], [r["id"] for r in rows])
 
         check("filter by document_type",
-              [r["id"] for r in client.get("/documents/?document_type=LOI").json()] == [plain["id"]])
+              ids("/documents/?document_type=LOI") == [plain["id"]])
         check("filter by category",
-              [r["id"] for r in client.get("/documents/?category=Roads").json()] == [withfile["id"]])
+              ids("/documents/?category=Roads") == [withfile["id"]])
         check("search matches client_name, case-insensitively",
-              [r["id"] for r in client.get("/documents/?q=acme").json()] == [withfile["id"]])
+              ids("/documents/?q=acme") == [withfile["id"]])
         check("search matches project_title",
-              [r["id"] for r in client.get("/documents/?q=Pipeline").json()] == [plain["id"]])
+              ids("/documents/?q=Pipeline") == [plain["id"]])
         check("search matches reference_number",
-              [r["id"] for r in client.get("/documents/?q=WO-77").json()] == [withfile["id"]])
+              ids("/documents/?q=WO-77") == [withfile["id"]])
         check("search + filter combine",
-              client.get("/documents/?q=acme&document_type=LOI").json() == [])
+              ids("/documents/?q=acme&document_type=LOI") == [])
         check("regex metacharacters in search are literal, not patterns",
-              client.get("/documents/?q=.*").json() == [])
+              ids("/documents/?q=.*") == [])
         check("search with no match returns empty",
-              client.get("/documents/?q=zzzznothing").json() == [])
+              ids("/documents/?q=zzzznothing") == [])
+
+        # --- paging and sorting -------------------------------------------
+        # The log used to come back whole. One page at a time now, counted
+        # against the same filter, in the shape every other list uses.
+        first = client.get("/documents/?page_size=1&page=1").json()
+        check("page 1 of size 1 holds the newest entry and the full total",
+              [r["id"] for r in first["items"]] == [withfile["id"]]
+              and first["total"] == 2 and first["page"] == 1 and first["page_size"] == 1,
+              str(first))
+        check("page 2 of size 1 holds the other entry",
+              ids("/documents/?page_size=1&page=2") == [plain["id"]])
+        past_end = client.get("/documents/?page_size=1&page=3").json()
+        check("a page past the end is empty but still reports the total",
+              past_end["items"] == [] and past_end["total"] == 2, str(past_end))
+        filtered = client.get("/documents/?q=acme&page_size=1").json()
+        check("the total counts the filtered set, not the whole log",
+              filtered["total"] == 1, str(filtered))
+        check("a page size of 0 is refused -> 422",
+              client.get("/documents/?page_size=0").status_code == 422)
+        check("a page size over the ceiling is refused -> 422",
+              client.get("/documents/?page_size=201").status_code == 422)
+
+        check("sort by client, A to Z",
+              ids("/documents/?sort=client_name") == [withfile["id"], plain["id"]])
+        check("sort by client, Z to A",
+              ids("/documents/?sort=-client_name") == [plain["id"], withfile["id"]])
+        check("sort by type",
+              ids("/documents/?sort=document_type") == [plain["id"], withfile["id"]])
+        # Only `plain` has a date: the blank one sorts last both ways round.
+        check("sort by date puts a blank date last, ascending",
+              ids("/documents/?sort=document_date") == [plain["id"], withfile["id"]])
+        check("sort by date puts a blank date last, descending",
+              ids("/documents/?sort=-document_date") == [plain["id"], withfile["id"]])
+        check("an unknown sort falls back to newest first",
+              ids("/documents/?sort=nonsense") == [withfile["id"], plain["id"]])
+        check("sorted rows carry no computed sort keys",
+              not any(k.startswith("_sort")
+                      for r in client.get("/documents/?sort=client_name").json()["items"]
+                      for k in r))
+
+        res = client.get("/documents/types")
+        check("GET /documents/types lists the types in use",
+              res.status_code == 200 and res.json() == ["LOI", "Work Order"], res.text)
 
         # --- update, metadata only --------------------------------------
         res = client.put(f"/documents/{plain['id']}", data={
@@ -1495,7 +1613,7 @@ def run_suite(collection):
         check("deleting the same id again -> 404",
               client.delete(f"/documents/{withfile['id']}").status_code == 404)
         check("the other entry survived the delete",
-              len(client.get("/documents/").json()) == 1)
+              client.get("/documents/").json()["total"] == 1)
 
         # --- cleanup ------------------------------------------------------
         client.delete(f"/documents/{plain['id']}")
@@ -1511,9 +1629,14 @@ def main_offline():
         print("    .\\venv\\Scripts\\python.exe -m pip install -r requirements-dev.txt")
         return 2
     print("Mode: offline (in-memory MongoDB stand-in; no server required)\n")
+    from verify_offline import install
+
     # tz_aware mirrors how app/mongodb.py builds the real client, so datetimes
-    # come back as UTC-aware here too.
-    collection = mongomock.MongoClient(tz_aware=True)["doc_collection_verify"]["documents"]
+    # come back as UTC-aware here too. The app's own client becomes this
+    # in-memory one, so startup and any collection not overridden below
+    # cannot reach the database in .env.
+    client = install(mongomock.MongoClient(tz_aware=True))
+    collection = client["doc_collection_verify"]["documents"]
     run_suite(collection)
     return 0
 

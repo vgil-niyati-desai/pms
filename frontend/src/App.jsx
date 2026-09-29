@@ -16,6 +16,10 @@ import NotFoundPage from "./features/NotFoundPage";
 /**
  * Every screen renders inside AppShell, so the sidebar and topbar are
  * mounted once and survive navigation.
+ *
+ * Each form page is mounted by both its "new" and its "edit" route. The keys
+ * tell React they are different screens: without them, "+ New" pressed on an
+ * edit screen reused that mounted form, still holding the record's values.
  */
 export default function App() {
   return (
@@ -23,17 +27,17 @@ export default function App() {
       <Route element={<AppShell />}>
         <Route path={paths.home()} element={<Navigate to={paths.projects()} replace />} />
         <Route path={paths.projects()} element={<ProjectsListPage />} />
-        <Route path={paths.newProject()} element={<ProjectFormPage />} />
+        <Route path={paths.newProject()} element={<ProjectFormPage key="new" />} />
         <Route path={paths.project(":projectId")} element={<ProjectDetailPage />} />
-        <Route path={paths.editProject(":projectId")} element={<ProjectFormPage />} />
+        <Route path={paths.editProject(":projectId")} element={<ProjectFormPage key="edit" />} />
         <Route path={paths.cvs()} element={<EmployeesListPage />} />
-        <Route path={paths.newEmployee()} element={<EmployeeFormPage />} />
+        <Route path={paths.newEmployee()} element={<EmployeeFormPage key="new" />} />
         <Route path={paths.employee(":employeeId")} element={<EmployeeDetailPage />} />
-        <Route path={paths.editEmployee(":employeeId")} element={<EmployeeFormPage />} />
+        <Route path={paths.editEmployee(":employeeId")} element={<EmployeeFormPage key="edit" />} />
         <Route path={paths.tenders()} element={<TendersListPage />} />
-        <Route path={paths.newTender()} element={<TenderFormPage />} />
+        <Route path={paths.newTender()} element={<TenderFormPage key="new" />} />
         <Route path={paths.tender(":tenderId")} element={<TenderDetailPage />} />
-        <Route path={paths.editTender(":tenderId")} element={<TenderFormPage />} />
+        <Route path={paths.editTender(":tenderId")} element={<TenderFormPage key="edit" />} />
         <Route path={paths.documents()} element={<DocumentsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>

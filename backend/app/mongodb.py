@@ -188,6 +188,17 @@ def ensure_indexes(collection: Optional[Collection] = None) -> None:
     # The two dropdown filters on the list screen.
     coll.create_index([("document_type", ASCENDING)], name="ix_documents_document_type")
     coll.create_index([("category", ASCENDING)], name="ix_documents_category")
+    # Which documents belong to one project. The same index migration 0001
+    # creates, by the same name -- create_index is idempotent, so whichever
+    # runs first makes it and the other is a no-op.
+    coll.create_index([("project_id", ASCENDING)], name="ix_documents_project_id")
+    # Which documents belong to one employee -- the same question project_id
+    # above answers for a project, and the same index migration 0003 creates,
+    # by the same name.
+    coll.create_index([("employee_id", ASCENDING)], name="ix_documents_employee_id")
+    # Which documents belong to one tender. The same index migration 0004
+    # creates, by the same name.
+    coll.create_index([("tender_id", ASCENDING)], name="ix_documents_tender_id")
 
 
 def ensure_project_indexes(collection: Optional[Collection] = None) -> None:
@@ -243,3 +254,9 @@ def ensure_tender_indexes(collection: Optional[Collection] = None) -> None:
     coll.create_index([("issuing_authority", ASCENDING)], name="ix_tenders_authority")
     # Multikey, for the tag filter.
     coll.create_index([("tags", ASCENDING)], name="ix_tenders_tags")
+    # Multikey too: which tenders cite one project, which is what clearing a
+    # deleted project's citations looks up. The same index migration 0005
+    # creates, by the same name.
+    coll.create_index(
+        [("cited_project_ids", ASCENDING)], name="ix_tenders_cited_project_ids"
+    )

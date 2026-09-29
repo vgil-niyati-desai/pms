@@ -65,6 +65,11 @@ def run_suite(projects, documents, offline=False):
     # has-document filter joins projects to the document log.
     main.app.dependency_overrides[mongodb.get_project_records] = lambda: projects
     main.app.dependency_overrides[mongodb.get_documents] = lambda: documents
+    # DELETE /documents/{id} now also clears the reference a tender holds, so
+    # the tenders collection is pointed at this suite's own database too.
+    main.app.dependency_overrides[mongodb.get_tender_records] = (
+        lambda: documents.database["tenders"]
+    )
     mongodb.ping = lambda: (True, None)
 
     try:
@@ -330,11 +335,31 @@ def run_suite(projects, documents, offline=False):
         check("the document survived being detached",
               client.get(f"/documents/{remaining}").status_code == 200)
 
+        # A tender citing this project as past evidence is cleared of it when
+        # the project goes: a citation of a project that cannot be opened is
+        # evidence of nothing.
+        citing = client.post("/tenders/", json={
+            "title": "Bid citing this project", "issuing_authority": "MSAMB",
+            "status": "Identified",
+        })
+        citing_id = citing.json()["id"] if citing.status_code == 201 else None
+        check("a tender exists to cite the project", citing_id is not None, citing.text)
+        client.post(f"/tenders/{citing_id}/projects/{pipeline_id}")
+        check("the tender cites the project",
+              client.get(f"/tenders/{citing_id}").json()["cited_project_ids"]
+              == [pipeline_id])
+
         res = client.delete(f"/projects/{pipeline_id}")
         check("DELETE /projects/{id} -> 204", res.status_code == 204, res.text)
         check("the project is gone", client.get(f"/projects/{pipeline_id}").status_code == 404)
         check("deleting a project leaves its documents in the log",
               client.get(f"/documents/{remaining}").status_code == 200)
+        check("deleting a project clears any tender's citation of it",
+              client.get(f"/tenders/{citing_id}").json()["cited_project_ids"] == [],
+              str(client.get(f"/tenders/{citing_id}").json()["cited_project_ids"]))
+        check("the citing tender itself survives",
+              client.get(f"/tenders/{citing_id}").status_code == 200)
+        client.delete(f"/tenders/{citing_id}")
         check("DELETE of an already-deleted project -> 404",
               client.delete(f"/projects/{pipeline_id}").status_code == 404)
 
@@ -362,7 +387,11 @@ def main_offline():
 
     print("Mode: offline — in-memory MongoDB stand-in (mongomock)\n")
     print("  (a few checks need a real server; those are marked SKIP)\n")
-    database = mongomock.MongoClient()["verify"]
+    from verify_offline import install
+
+    # The app's own client becomes this in-memory one, so startup and any
+    # collection not overridden below cannot reach the database in .env.
+    database = install(mongomock.MongoClient())["verify"]
     run_suite(database["projects"], database["documents"], offline=True)
     return 0
 

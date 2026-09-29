@@ -14,6 +14,7 @@ import {
 import {
   CERTIFICATION_DOCUMENT_TYPE,
   createAttachment,
+  changedDetails,
   deleteAttachment,
   updateAttachment,
 } from "../../api/attachments";
@@ -47,22 +48,46 @@ export default function CertificationDrawer({ employee, certification, onClose, 
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
   const fileInputRef = useRef(null);
+  // The form as it opened, to tell what an edit actually changed.
+  const openedWith = useRef(form);
+  // Saving and deleting are each two requests, and the second can fail on
+  // its own. These remember that the first already succeeded, so a retry
+  // finishes the job rather than starting it again -- as the attached
+  // document drawer does.
+  const createdIdRef = useRef(null);
+  const deletedRef = useRef(false);
 
   function handleChange(e) {
     const { name, value } = e.target;
     setForm((prev) => ({ ...prev, [name]: value }));
   }
 
+  // The details this drawer's own form decides. Everything else on the
+  // document is written once, when it is created, and never again from here.
+  function attachmentEdits(values) {
+    return {
+      title: values.name,
+      reference: values.certificate_number,
+      date: values.issue_date,
+    };
+  }
+
   function attachmentDetails() {
     return {
       documentType: CERTIFICATION_DOCUMENT_TYPE,
       subjectName: employee.full_name,
-      title: form.name,
-      reference: form.certificate_number,
-      date: form.issue_date,
-      uploadedBy: employee.full_name,
+      // No uploadedBy: this drawer does not ask who uploaded the file, and the
+      // holder's name is not that -- so "Submitted by" is left empty rather
+      // than filled with the wrong person.
+      ...attachmentEdits(form),
       file,
     };
+  }
+
+  // Only what changed since the drawer opened, so an edit never rewrites
+  // document fields the person did not touch here.
+  function editedDetails() {
+    return { ...changedDetails(attachmentEdits(openedWith.current), attachmentEdits(form)), file };
   }
 
   async function handleSubmit(e) {
@@ -86,12 +111,18 @@ export default function CertificationDrawer({ employee, certification, onClose, 
         document_id: certification?.document_id ?? null,
         file_name: certification?.file_name ?? null,
       };
-      if (file && attachment.document_id) {
-        attachment = await updateAttachment(attachment.document_id, attachmentDetails());
+      if (createdIdRef.current) {
+        // Uploaded on an earlier attempt; only saving the record failed.
+        // Uploading again would orphan that first copy in the document log --
+        // or be refused as a duplicate file -- so the retry reuses it.
+        attachment = await updateAttachment(createdIdRef.current, attachmentDetails());
+      } else if (file && attachment.document_id) {
+        attachment = (await updateAttachment(attachment.document_id, editedDetails())) ?? attachment;
       } else if (file) {
         attachment = await createAttachment(attachmentDetails());
+        createdIdRef.current = attachment.document_id;
       } else if (isEditing && attachment.document_id) {
-        attachment = await updateAttachment(attachment.document_id, attachmentDetails());
+        attachment = (await updateAttachment(attachment.document_id, editedDetails())) ?? attachment;
       }
 
       const values = { ...form, ...attachment };
@@ -108,7 +139,12 @@ export default function CertificationDrawer({ employee, certification, onClose, 
     setDeleting(true);
     setDeleteError(null);
     try {
-      if (certification.document_id) await deleteAttachment(certification.document_id);
+      // Once the file is gone a retry must not delete it again: it would 404
+      // and never reach the record itself.
+      if (certification.document_id && !deletedRef.current) {
+        await deleteAttachment(certification.document_id);
+        deletedRef.current = true;
+      }
       await deleteCertification(employee.id, certification.id);
       onSaved();
     } catch (err) {

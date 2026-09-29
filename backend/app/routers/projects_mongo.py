@@ -22,7 +22,8 @@ from pymongo import DESCENDING, ReturnDocument
 from pymongo.collection import Collection
 
 from .. import schemas
-from ..mongodb import get_documents, get_project_records
+from ..mongodb import get_documents, get_project_records, get_tender_records
+from .documents_mongo import serialise_document
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -74,17 +75,107 @@ def _object_id(project_id: str) -> ObjectId:
         raise HTTPException(status_code=404, detail="Project not found")
 
 
-def _serialise(doc: Dict[str, Any]) -> Dict[str, Any]:
+def _serialise(
+    doc: Dict[str, Any], document_types: Optional[List[str]] = None
+) -> Dict[str, Any]:
     """Mongo document -> the shape schemas.ProjectOut expects.
 
     Underscore-prefixed keys are dropped: _id becomes id, and the sort keys
     the list pipeline computes are scaffolding the client never sees.
+
+    document_types is resolved by the caller, which knows whether it is
+    answering for one project or a page of them and can do it in one query
+    either way.
     """
     out = {key: value for key, value in doc.items() if not key.startswith("_")}
     out["id"] = str(doc["_id"])
     out.setdefault("tags", [])
     out.setdefault("document_ids", [])
+    out["document_types"] = list(document_types or [])
     return out
+
+
+def _document_oids(document_ids: List[str]) -> List[ObjectId]:
+    """The ids that are parseable, as ObjectIds.
+
+    An unparseable entry is skipped rather than raising: it can only be
+    junk left by something outside this API, and one bad string must not
+    make a project unreadable.
+    """
+    oids = []
+    for document_id in document_ids or []:
+        try:
+            oids.append(ObjectId(document_id))
+        except (InvalidId, TypeError):
+            continue
+    return oids
+
+
+def _types_by_project(
+    documents: Collection, records: List[Dict[str, Any]]
+) -> Dict[str, List[str]]:
+    """{project id: the distinct document types it holds}, in one query.
+
+    The list screen draws an evidence pill per type, and used to download the
+    entire document log to work that out for itself. This answers the same
+    question for just the projects on the page.
+
+    Resolved through document_ids rather than through documents.project_id:
+    that array is what every writer maintains and what the migration treated
+    as the source of truth, so it stays right even for a document the
+    migration deliberately left unassigned.
+    """
+    wanted: List[str] = []
+    for record in records:
+        wanted.extend(record.get("document_ids") or [])
+    if not wanted:
+        return {}
+
+    type_by_id = {
+        str(doc["_id"]): doc.get("document_type")
+        for doc in documents.find(
+            {"_id": {"$in": _document_oids(list(set(wanted)))}},
+            {"_id": 1, "document_type": 1},
+        )
+    }
+
+    resolved: Dict[str, List[str]] = {}
+    for record in records:
+        seen: List[str] = []
+        for document_id in record.get("document_ids") or []:
+            document_type = type_by_id.get(document_id)
+            # A type is listed once however many documents carry it: the strip
+            # answers whether the project holds one, not how many. Holding
+            # three Work Orders is normal -- they are issued separately.
+            if document_type and document_type not in seen:
+                seen.append(document_type)
+        resolved[str(record["_id"])] = seen
+    return resolved
+
+
+# The tenders router lists the projects a tender cites and needs the same
+# shape back. Exported rather than duplicated, so the two can never drift.
+serialise_project = _serialise
+types_by_project = _types_by_project
+
+
+def _owner_project(
+    projects: Collection, project_id: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """The project a document says it belongs to, if that project exists.
+
+    None covers three cases that all mean the same thing here -- the
+    document names no project, names an unparseable one, or names one that
+    has since been deleted -- so a stale claim cannot make a document
+    permanently unattachable.
+    """
+    if not project_id:
+        return None
+    try:
+        oid = ObjectId(project_id)
+    except (InvalidId, TypeError):
+        return None
+    return projects.find_one({"_id": oid}, {"_id": 1, "title": 1})
 
 
 def _exact_ci(value: str) -> re.Pattern:
@@ -296,8 +387,14 @@ def list_projects(
     pipeline.append({"$skip": (page - 1) * page_size})
     pipeline.append({"$limit": page_size})
 
-    # _serialise drops the computed keys on the way out.
-    items = [_serialise(doc) for doc in projects.aggregate(pipeline)]
+    # Not named `page`: that is the page *number* parameter above, and
+    # shadowing it put a list of records into the response's page field.
+    records = list(projects.aggregate(pipeline))
+    # One extra query for the whole page, which is what lets the list screen
+    # draw its evidence pills without downloading the document log.
+    types = _types_by_project(documents, records)
+    # _serialise drops the computed sort keys on the way out.
+    items = [_serialise(doc, types.get(str(doc["_id"]))) for doc in records]
     return {
         "items": items,
         "total": projects.count_documents(query),
@@ -306,12 +403,53 @@ def list_projects(
     }
 
 
+@router.get("/{project_id}/documents", response_model=List[schemas.DocumentMongoOut])
+def list_project_documents(
+    project_id: str,
+    projects: Collection = Depends(get_project_records),
+    documents: Collection = Depends(get_documents),
+):
+    """The documents belonging to one project, newest first.
+
+    This is what the Documents tab reads. It used to fetch the whole document
+    log and filter it in the browser, which meant every project screen paid
+    for every CV, tender receipt and unattached entry in the system.
+
+    Both representations are accepted: a document counts as this project's if
+    it carries the project_id *or* if the project lists it. During the
+    transition either one alone is enough, so a document the migration left
+    unassigned -- one two projects both claim, say -- still appears under the
+    project that references it, and a document stamped by a create whose
+    follow-up write failed still appears too.
+
+    Ordering matches the document log's own: newest first, with _id breaking
+    ties. The tab groups by type on top of that, so documents of the same
+    type keep their newest-first order inside their group.
+    """
+    record = projects.find_one({"_id": _object_id(project_id)}, {"document_ids": 1})
+    if not record:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    query = {
+        "$or": [
+            {"project_id": project_id},
+            {"_id": {"$in": _document_oids(record.get("document_ids") or [])}},
+        ]
+    }
+    cursor = documents.find(query).sort([("created_at", DESCENDING), ("_id", DESCENDING)])
+    return [serialise_document(doc) for doc in cursor]
+
+
 @router.get("/{project_id}", response_model=schemas.ProjectOut)
-def get_project(project_id: str, projects: Collection = Depends(get_project_records)):
+def get_project(
+    project_id: str,
+    projects: Collection = Depends(get_project_records),
+    documents: Collection = Depends(get_documents),
+):
     record = projects.find_one({"_id": _object_id(project_id)})
     if not record:
         raise HTTPException(status_code=404, detail="Project not found")
-    return _serialise(record)
+    return _serialise(record, _types_by_project(documents, [record]).get(project_id))
 
 
 @router.post("/", response_model=schemas.ProjectOut, status_code=201)
@@ -327,6 +465,7 @@ def create_project(
 
     result = projects.insert_one(record)
     record["_id"] = result.inserted_id
+    # A new project holds nothing yet, so the derived list is empty.
     return _serialise(record)
 
 
@@ -335,6 +474,7 @@ def update_project(
     project_id: str,
     payload: schemas.ProjectIn,
     projects: Collection = Depends(get_project_records),
+    documents: Collection = Depends(get_documents),
 ):
     """Replace the editable fields.
 
@@ -352,20 +492,46 @@ def update_project(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    return _serialise(updated)
+    return _serialise(updated, _types_by_project(documents, [updated]).get(project_id))
 
 
 @router.delete("/{project_id}", status_code=204)
-def delete_project(project_id: str, projects: Collection = Depends(get_project_records)):
+def delete_project(
+    project_id: str,
+    projects: Collection = Depends(get_project_records),
+    documents: Collection = Depends(get_documents),
+    tenders: Collection = Depends(get_tender_records),
+):
     """Delete the project, leaving its documents in the document log.
 
     That is what the confirmation dialog promises, and it is the right way
     round: a document is evidence in its own right and may be cited by a
     tender that has nothing to do with this project.
+
+    What does not survive is the pointer back: a document left carrying the
+    id of a project that no longer exists would be claimed by nothing and
+    findable under a project that cannot be opened. The documents stay, their
+    files stay, and they simply belong to no project again.
     """
     record = projects.find_one_and_delete({"_id": _object_id(project_id)})
     if not record:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    documents.update_many(
+        {"project_id": project_id}, {"$set": {"project_id": None}}
+    )
+
+    # A tender citing this project as past experience is cleared of it too,
+    # for the same reason: a citation of a project that cannot be opened is
+    # evidence of nothing. Only the citation goes -- the tender itself, its
+    # own documents and everything else about it are untouched.
+    tenders.update_many(
+        {"cited_project_ids": project_id},
+        {
+            "$pull": {"cited_project_ids": project_id},
+            "$set": {"updated_at": _now_utc_ms()},
+        },
+    )
     return Response(status_code=204)
 
 
@@ -378,12 +544,55 @@ def link_document(
 ):
     """Attach an existing document to this project.
 
-    $addToSet rather than $push, so attaching the same document twice is a
-    no-op instead of a duplicate entry.
+    Idempotent. $addToSet rather than $push, so attaching the same document
+    twice is a no-op instead of a duplicate entry, and the project_id write
+    below is a no-op once it already names this project. Note that this is
+    about the *same document* twice: two different documents of the same
+    type are a normal thing for a project to hold -- they are issued at
+    different times -- and nothing here or in the indexes prevents it.
+
+    A document another live project already holds is refused with a 409
+    naming that project, rather than being quietly moved. Reassigning it
+    would take the document out of a project that is still showing it, and
+    nothing would say so. Detaching it there first is the way to move it;
+    the alternative is to upload a copy, which is a different document.
+
+    Nothing is written before that check, so a refused attach changes
+    neither representation.
     """
     oid = _object_id(project_id)
-    if not documents.find_one({"_id": _object_id(document_id)}, {"_id": 1}):
+    document_oid = _object_id(document_id)
+    document = documents.find_one(
+        {"_id": document_oid}, {"_id": 1, "project_id": 1}
+    )
+    if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+    # Before the ownership test below, so naming a project that does not exist
+    # is answered "Project not found" rather than refused as a conflict with a
+    # project the document was never going to join.
+    if not projects.find_one({"_id": oid}, {"_id": 1}):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Claims this project may overwrite: unset, absent, or already its own.
+    free_claims: List[Dict[str, Any]] = [
+        {"project_id": None},
+        {"project_id": {"$exists": False}},
+        {"project_id": project_id},
+    ]
+    claimed_by = document.get("project_id")
+    if claimed_by and claimed_by != project_id:
+        owner = _owner_project(projects, claimed_by)
+        if owner is not None:
+            title = (owner.get("title") or "").strip() or "another project"
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f'This document is already attached to "{title}". '
+                    "Detach it there first, or upload a copy to this project."
+                ),
+            )
+        # The project it names is gone, so nothing is really holding it.
+        free_claims.append({"project_id": claimed_by})
 
     updated = projects.find_one_and_update(
         {"_id": oid},
@@ -392,7 +601,15 @@ def link_document(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    return _serialise(updated)
+
+    # Conditional rather than a plain $set: between the read above and this
+    # write another request could have claimed the document, and the filter
+    # is what stops this one taking it anyway.
+    documents.update_one(
+        {"_id": document_oid, "$or": free_claims},
+        {"$set": {"project_id": project_id}},
+    )
+    return _serialise(updated, _types_by_project(documents, [updated]).get(project_id))
 
 
 @router.delete("/{project_id}/documents/{document_id}", response_model=schemas.ProjectOut)
@@ -400,13 +617,18 @@ def unlink_document(
     project_id: str,
     document_id: str,
     projects: Collection = Depends(get_project_records),
+    documents: Collection = Depends(get_documents),
 ):
-    """Detach a document from this project.
+    """Detach a document from this project. The document itself is kept.
 
-    The document is deliberately not looked up. Deleting an attached document
-    detaches it as a second step, by which point it is already gone — and a
-    link left pointing at a deleted document is exactly what this call exists
-    to clear.
+    The document is deliberately not looked up first. Deleting an attached
+    document detaches it as a second step, by which point it is already gone
+    — and a link left pointing at a deleted document is exactly what this
+    call exists to clear.
+
+    The document's project_id is cleared only where it names *this* project.
+    A document another project holds is not this call's to unclaim, and a
+    document that is already gone simply matches nothing.
     """
     updated = projects.find_one_and_update(
         {"_id": _object_id(project_id)},
@@ -415,4 +637,14 @@ def unlink_document(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    return _serialise(updated)
+
+    try:
+        document_oid = ObjectId(document_id)
+    except (InvalidId, TypeError):
+        document_oid = None
+    if document_oid is not None:
+        documents.update_one(
+            {"_id": document_oid, "project_id": project_id},
+            {"$set": {"project_id": None}},
+        )
+    return _serialise(updated, _types_by_project(documents, [updated]).get(project_id))

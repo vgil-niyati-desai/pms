@@ -98,7 +98,7 @@ function clamp01(value) {
   return Math.min(1, Math.max(0, value));
 }
 
-export default function DocumentRedactor({ documentId, fileName, onCancel }) {
+export default function DocumentRedactor({ documentId, fileName, onCancel, onDirtyChange }) {
   const [source, setSource] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [pageIndex, setPageIndex] = useState(0);
@@ -124,6 +124,9 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
   const [preview, setPreview] = useState(null);
+  // The selection the last successful download was generated from. Once a
+  // copy of exactly this selection is on disk, closing loses nothing.
+  const [downloadedFor, setDownloadedFor] = useState(null);
 
   const surfaceRef = useRef(null);
   const stageRef = useRef(null);
@@ -226,6 +229,20 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
     (suggestion) => suggestion.status === ACCEPTED,
   ).length;
   const confirmedHere = confirmed.filter((area) => area.page === pageIndex);
+
+  // Work that closing would throw away: any drawn or accepted box, or any
+  // suggestion that has been decided either way. Nothing here is stored
+  // anywhere, so the viewer asks before letting it go -- unless the current
+  // selection has already been downloaded as a redacted copy.
+  const hasWork =
+    confirmed.length > 0 || suggestions.some((suggestion) => suggestion.status !== PENDING);
+  const dirty = hasWork && downloadedFor !== confirmed;
+
+  // A layout effect, so the viewer knows in the same commit that added a box:
+  // Escape pressed straight after drawing must already find it unsaved.
+  useLayoutEffect(() => {
+    if (onDirtyChange) onDirtyChange(dirty);
+  }, [dirty, onDirtyChange]);
 
   // A new page is a new image to wait for.
   useEffect(() => {
@@ -502,6 +519,7 @@ export default function DocumentRedactor({ documentId, fileName, onCancel }) {
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
+      setDownloadedFor(confirmed);
       setDone(`Downloaded ${built.fileName}. The original is unchanged.`);
     } catch (err) {
       setError(err.message);

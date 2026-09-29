@@ -169,7 +169,11 @@ export default function TenderFormPage() {
               onChange={handleChange}
             />
           </Field>
-          <Field label="EMD amount" htmlFor="emd_amount">
+          <Field
+            label="EMD required"
+            htmlFor="emd_amount"
+            hint="Record the payment itself under Costs."
+          >
             <input
               id="emd_amount"
               name="emd_amount"
@@ -182,7 +186,11 @@ export default function TenderFormPage() {
         </FormRow>
 
         <FormRow>
-          <Field label="Tender fee" htmlFor="tender_fee">
+          <Field
+            label="Tender fee required"
+            htmlFor="tender_fee"
+            hint="Record the payment itself under Costs."
+          >
             <input
               id="tender_fee"
               name="tender_fee"

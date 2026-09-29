@@ -242,6 +242,95 @@ that browser under the key `pms.projects.v1`. It is not read any more and is
 not migrated — those records were only ever visible in the one browser that
 made them. Say the word if you want a one-off import written.
 
+## 3b-i. The document -> project link, and migration 0001
+
+Until now the only record of which project a document belonged to was the
+project's own `document_ids` array. Answering "which documents does this
+project hold?" meant downloading every document in the log and filtering it in
+the browser, so opening any project paid for every CV, tender receipt and
+unattached entry in the system.
+
+A document now also carries `project_id`, holding the project's existing id
+(or `null` for a document that belongs to no project — a CV, a tender
+receipt, an entry logged on its own). Two endpoints follow from it:
+
+```
+GET /projects/{id}/documents     that project's documents, newest first
+```
+
+and every project in `GET /projects/` and `GET /projects/{id}` now carries a
+derived `document_types` array — the distinct types it holds — which is what
+the list screen's evidence pills read.
+
+**Both representations are kept.** `document_ids` has not been removed and is
+still written by every path that attaches or detaches, because it is what the
+existing data, the "has document" filter and the verification suites all rely
+on. `project_id` is the addition, not the replacement. Keeping the two in step
+is deliberate for this transition:
+
+- creating a document with `project_id` also adds it to that project's
+  `document_ids`, in the same request
+- attaching sets both; detaching clears both. Attaching is idempotent, and
+  attaching a document another live project already holds is refused with a
+  **409** naming that project rather than moving it — the Add Document drawer
+  offers "Attach existing" alongside "Upload new", and that is what stops it
+  quietly taking a document out of a project still showing it
+- deleting a document pulls its id from any project referencing it, so a
+  delete from the document log screen can no longer leave a dangling id
+- deleting a project clears `project_id` on its documents, which stay in the
+  log with their files
+
+Reads accept either: `GET /projects/{id}/documents` returns a document that
+carries the `project_id` **or** that the project lists, so nothing disappears
+if one of the two writes did not land.
+
+### Running the migration
+
+Existing databases need `project_id` populated once. From `backend/`:
+
+```powershell
+.\venv\Scripts\python.exe migrate.py --status     # what has been applied
+.\venv\Scripts\python.exe migrate.py --dry-run    # report only, writes nothing
+.\venv\Scripts\python.exe migrate.py              # apply
+```
+
+`0001_document_project_id` sets `project_id` from the existing
+`document_ids`, creates `ix_documents_project_id`, and records itself in a
+`migrations` collection so a second run is a no-op. It works in place — it
+never copies or replaces a database — and it touches only `documents`.
+
+It writes no document's `project_id` where the answer would be a guess. A
+document two projects both reference, a reference pointing at a document that
+is not there, or a document already holding a different project's id are all
+**reported and left exactly as they are**, for a person to settle. The run
+prints what it skipped.
+
+`0002_standardise_contract_type` renames the document type
+`Contract (Consultant Services)` to `Contract`. Two imported documents carried
+the long spelling, which nothing matched: the evidence strip, the has-document
+filter and the type dropdown have always said `Contract`, so the two projects
+holding them showed Contract as missing and could never read as fully
+evidenced. It changes that one field value and nothing else — no document is
+created, deleted or re-id'd, no file is touched, and the project links are
+neither read nor written.
+
+`0003_document_employee_id` does for employees what 0001 did for projects:
+it sets `employee_id` on a document from the `document_id` each CV and
+certification already carried, and creates `ix_documents_employee_id`. It
+reads the employee's nested records only, refuses the same four ambiguous
+cases 0001 refuses, and does not claim a document that is already a
+project's.
+
+`0004_document_tender_id` and `0005_tender_cited_project_ids` are described
+in sections 3d-i and 3d-ii.
+
+Other types that are *not* renamed, deliberately: `Agreement`,
+`Acceptance of Tender-cum-Order`, `Acceptance of Quotation-cum-Order`,
+`Cover / Tender Notice`, and the CV and certificate types. Whether any of
+those should fold into an evidence type is a question about the business
+vocabulary, not something a rename should decide; the run lists them so it is
+clear what it left alone.
+
 ## 3c. What the Employees/CV backend added
 
 Employees answer a tender's personnel criteria: who can be named, what they
@@ -346,8 +435,12 @@ DELETE /tenders/{id}/cost-items/{item_id}         remove one
 POST   /tenders/{id}/certificates                 record a certificate
 PUT    /tenders/{id}/certificates/{cert_id}       edit one
 DELETE /tenders/{id}/certificates/{cert_id}       remove one
+GET    /tenders/{id}/documents                    that tender's documents
 POST   /tenders/{id}/documents/{document_id}      attach a document
 DELETE /tenders/{id}/documents/{document_id}      detach a document
+GET    /tenders/{id}/projects                     the projects it cites
+POST   /tenders/{id}/projects/{project_id}        cite a project as evidence
+DELETE /tenders/{id}/projects/{project_id}        stop citing one
 ```
 
 Worth knowing:
@@ -362,12 +455,94 @@ Worth knowing:
   or certificate keeps the `document_id`. Deleting a tender removes its
   nested records but leaves every file and document in the log — which is
   what the confirmation dialog promises.
+- **A cost item's receipt is not one of the tender's documents.** The
+  Documents tab holds what the bid was *filed with* — the notice, a
+  corrigendum, the submitted bid, an award letter — which are documents that
+  can be put to a tender again. A payment receipt is evidence of what this
+  one bid cost, so it stays on the Costs & certificates tab with the amount
+  and instrument number it belongs to, and carries no `tender_id`. Deleting
+  such a document from the log clears the pointer on the cost item or
+  certificate (and its stale `file_name`) but keeps the record itself, the
+  way deleting a CV's file keeps the CV.
 
 Anything saved into the old browser-local store is still in that browser
 under `pms.tenders.v1`, unread and unmigrated, like `pms.projects.v1` and
 `pms.employees.v1` before it. Say the word if you want a one-off import
 written. With tenders moved, `frontend/src/api/localStore.js` had no
 importers left and was deleted, as its own comment always planned.
+
+## 3d-i. The document -> tender link, and migration 0004
+
+The same move projects made in 0001 and employees in 0003, for the third and
+last area. Until now the only record of which tender a document was attached
+to was the tender's own `document_ids` array, so a document deleted from the
+log left its id behind there, pointing at nothing.
+
+A document now also carries `tender_id` (or `null` for a document that is no
+tender's), and one endpoint follows from it:
+
+```
+GET /tenders/{id}/documents     that tender's documents, newest first
+```
+
+which the Documents tab reads instead of downloading the whole log and
+filtering it in the browser.
+
+**Attaching is deliberately not exclusive.** A project refuses a document
+another project holds, and so does an employee; a tender does not, because
+the documents a bid is filed with — a registration certificate, an ISO
+certificate, a past work order — are meant to be put to bid after bid. So
+`document_ids` may name the same document on several tenders. `tender_id`
+can only name one, and keeps the first claim rather than moving; which is
+why the endpoint above matches on `tender_id` **or** the tender's
+`document_ids`, and why reading only `tender_id` would hide a document from
+the second tender that holds it.
+
+Deleting a document clears it from every tender's `document_ids`; deleting a
+tender clears `tender_id` from its documents but leaves the documents in the
+log.
+
+`0004_document_tender_id` sets `tender_id` from the existing `document_ids`
+and creates `ix_documents_tender_id`. Like 0001 it refuses to guess: a
+document two tenders both list, a reference pointing at a document that is
+not there, a document already holding a different tender's id, and a document
+that is already a project's or an employee's are all **reported and left
+exactly as they are**. It reads `document_ids` only — a cost item's receipt
+is not claimed, because it is not one of the tender's documents.
+
+## 3d-ii. Cited projects, and migration 0005
+
+A tender cites the past work it puts forward as experience, in
+`cited_project_ids`:
+
+```
+GET    /tenders/{id}/projects                  the projects it cites
+POST   /tenders/{id}/projects/{project_id}     cite one
+DELETE /tenders/{id}/projects/{project_id}     stop citing one
+```
+
+Each row comes back as an ordinary project, carrying the same
+`document_types` the projects list resolves, so the evidence strip reads the
+same on this tab as it does on the Projects screen.
+
+**A citation is not ownership.** Citing a project changes nothing about it,
+and does not reach its documents: `projects.document_ids` and
+`documents.project_id` are neither read nor written, and a cited project's
+files do not appear on the tender's Documents tab. Citing is not exclusive
+either, and never could be — the whole point of past evidence is that the
+same completed project is put forward bid after bid. Deleting a project
+clears the citation from every tender that made it; the tender itself is
+untouched.
+
+This is **not** the project a won tender produced. There is no
+`tenders.project_id`, and citing carries no outcome, no assignment and no
+status.
+
+`0005_tender_cited_project_ids` gives every existing tender an empty
+`cited_project_ids` and creates `ix_tenders_cited_project_ids`. Unlike its
+three siblings it derives nothing: no record of which projects a tender cites
+has ever existed, so there is nothing to read it from. A citation pointing at
+a project that is no longer there is reported rather than cleared.
 
 ## 3e. What manual redaction added
 

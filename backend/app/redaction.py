@@ -286,6 +286,15 @@ def _redact_pdf(path: str, areas: List[Area]) -> bytes:
                 )
                 if rect.is_empty:
                     continue
+                # The fractions are of the page as displayed, which is what
+                # page.rect and the rendered page image describe. The
+                # annotation and drawing side of PyMuPDF works in unrotated
+                # page space and applies /Rotate itself, so on a rotated page
+                # the displayed rectangle has to be turned back first --
+                # otherwise the box lands elsewhere and the content the user
+                # marked is left in the copy. On an unrotated page this
+                # matrix is the identity.
+                rect = (rect * page.derotation_matrix).normalize()
                 rects.append(rect)
                 page.add_redact_annot(rect, fill=PDF_FILL)
             if not rects:

@@ -49,8 +49,13 @@ export default function EmployeeDetailPage() {
     employee.reload();
   }
 
-  if (employee.loading) return <p className="muted">Loading...</p>;
-  if (employee.error) {
+  // Only while there is nothing to show yet. Every CV and certification save
+  // reloads the employee, and without the data check that reload replaced
+  // the whole page with "Loading..." each time.
+  if (employee.loading && !employee.data) return <p className="muted">Loading...</p>;
+  // A reload that fails once the record is on screen reports inline below
+  // the header instead, as the project page does.
+  if (employee.error && !employee.data) {
     return (
       <div className="card">
         <div className="alert alert-error">{employee.error}</div>
@@ -108,6 +113,12 @@ export default function EmployeeDetailPage() {
           </>
         }
       />
+
+      {employee.error && (
+        <div className="alert alert-error">
+          {employee.error} The employee below may be out of date — reload the page.
+        </div>
+      )}
 
       <Tabs
         tabs={TABS}

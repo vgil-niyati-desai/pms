@@ -3,11 +3,27 @@
 export const dash = (value) =>
   value === null || value === undefined || value === "" ? "—" : value;
 
-/** "2021-05-20 – 2024-09-05", or one side of it, or a dash. */
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * An ISO day as "20 May 2021".
+ *
+ * Anything that is not an ISO day is returned as it was stored rather than
+ * blanked: showing the odd value is how anyone finds out it is there.
+ */
+function formatDay(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
+  if (!match) return value;
+  const month = MONTHS[Number(match[2]) - 1];
+  return month ? `${match[3]} ${month} ${match[1]}` : value;
+}
+
+/** "20 May 2021 – 05 Sep 2024", or one side of it, or a dash. */
 export function formatPeriod(start, end) {
-  if (start && end) return `${start} – ${end}`;
-  if (start) return `From ${start}`;
-  if (end) return `Until ${end}`;
+  if (start && end) return `${formatDay(start)} – ${formatDay(end)}`;
+  if (start) return `From ${formatDay(start)}`;
+  if (end) return `Until ${formatDay(end)}`;
   return "—";
 }
 

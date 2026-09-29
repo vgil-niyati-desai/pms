@@ -1,5 +1,13 @@
-from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from datetime import date, datetime
 
 
@@ -29,6 +37,30 @@ class DocumentFields(BaseModel):
     submitted_by: Optional[str] = None
     notes: Optional[str] = None
     file_name: Optional[str] = None
+    # The project this document belongs to, as the project's own id, or
+    # None for a document that is not a project's -- a CV, a tender
+    # receipt, or a project document logged before it was attached.
+    #
+    # The project also lists the document in its own document_ids. Both
+    # are maintained: this one answers "whose is this?" without reading
+    # every project, and that one answers "what does this project hold?"
+    # and is still what every existing writer keeps up to date.
+    project_id: Optional[str] = None
+    # The employee this document belongs to, as the employee's own id, or
+    # None for a document that is nobody's -- a project's evidence, a tender
+    # receipt, or a CV logged before the reverse pointer existed.
+    #
+    # The counterpart of project_id above, and maintained the same way. The
+    # employee also names the document from the other side, in the CV or
+    # certification that points at it; this one answers "whose is this?"
+    # without reading every employee.
+    employee_id: Optional[str] = None
+    # The tender this document belongs to, as the tender's own id, or None
+    # for a document that is no tender's. The third of the three owners, and
+    # maintained exactly as the two above are: the tender also lists the
+    # document in its own document_ids, and this answers "whose is this?"
+    # without reading every tender.
+    tender_id: Optional[str] = None
     created_at: datetime
 
 
@@ -40,6 +72,15 @@ class DocumentMongoOut(DocumentFields):
     """
 
     id: str
+
+
+class DocumentPage(BaseModel):
+    """One page of the document log, in the same shape as every other list."""
+
+    items: List[DocumentMongoOut]
+    total: int
+    page: int
+    page_size: int
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +173,11 @@ class ProjectOut(ProjectFields):
 
     id: str
     document_ids: List[str] = Field(default_factory=list)
+    # The distinct document types this project holds, resolved by the
+    # server. Derived, never stored: it is what the list screen draws its
+    # evidence pills from, and computing it here is what lets that screen
+    # stop downloading the whole document log to work it out for itself.
+    document_types: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -467,11 +513,475 @@ class TenderCertificateOut(TenderCertificateIn):
     created_at: datetime
 
 
+# ---------------------------------------------------------------------------
+# Qualification criteria
+#
+# What a tender demands of a bidder, recorded from the tender notice so the
+# evidence can later be gathered against it. Embedded in the tender like its
+# cost items: a criterion means nothing apart from the bid that states it.
+#
+# Every criterion carries the same frame -- mandatory or desirable, where in
+# the notice it came from, the wording as published -- and a `params` object
+# whose shape depends on its `kind`. The published wording is kept beside the
+# structured fields because clauses rarely fit a template exactly, and the
+# wording is what anyone checking the structured version goes back to.
+#
+# Amounts here are numbers, in rupees, unlike the strings the tender's own
+# money fields hold: a criterion's amount exists to be compared against.
+# Nothing is matched yet; these only record the requirements.
+# ---------------------------------------------------------------------------
+
+MAX_CRITERIA = 100
+
+# Which group each kind is listed under on the tender.
+CRITERION_CATEGORIES = {
+    "similar_projects": "technical",
+    "project_value": "technical",
+    "personnel": "personnel",
+    "financial": "financial",
+    "certification": "documents",
+    "document": "documents",
+    "other": "other",
+}
+
+_MAX_TEXT = 500
+_MAX_LONG_TEXT = 2000
+_MAX_YEARS = 60
+MAX_REQUIRED_CERTIFICATIONS = 50
+
+
+class _Strict(BaseModel):
+    """The rules every criterion model shares.
+
+    Unknown fields are refused rather than silently stored. Types are strict:
+    "3" is not a count and `true` is not an amount, so a value of the wrong
+    type is refused instead of converted into something nobody entered --
+    except a whole number where a decimal is expected, which is the same
+    number. Infinity and NaN are refused: they are not amounts or years, and
+    JSON cannot carry them back out, so one stored would read back as blank.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+
+# Messages from the validators below name no field: the error handling at the
+# bottom of this section puts the field's label in front of every message, so
+# each reads "Role: is required" rather than a bare "is required".
+
+
+def _clean_text(value: Optional[str], limit: int = _MAX_TEXT) -> Optional[str]:
+    """Trimmed text, None when blank, refused when over the limit."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) > limit:
+        raise ValueError(f"must be at most {limit} characters")
+    return text
+
+
+def _clean_list(values: List[str], limit: int) -> List[str]:
+    """Trim, drop blanks, de-duplicate case-insensitively -- as tags are --
+    then refuse more than `limit` entries. Counted after cleaning, so a list
+    padded with blanks or repeats is judged by what would be stored."""
+    cleaned: List[str] = []
+    seen = set()
+    for position, value in enumerate(values or [], start=1):
+        text = str(value).strip()
+        if not text or text.lower() in seen:
+            continue
+        if len(text) > _MAX_TEXT:
+            raise ValueError(f"entry {position} must be at most {_MAX_TEXT} characters")
+        seen.add(text.lower())
+        cleaned.append(text)
+    if len(cleaned) > limit:
+        raise ValueError(f"must list at most {limit} entries")
+    return cleaned
+
+
+def _required_text(value: Optional[str]) -> str:
+    text = _clean_text(value)
+    if not text:
+        raise ValueError("is required")
+    return text
+
+
+class SimilarProjectsParams(_Strict):
+    count: int = Field(ge=1, le=1000)
+    work_description: Optional[str] = None
+    min_value_each: Optional[float] = Field(default=None, ge=0)
+    completed_within_years: Optional[float] = Field(default=None, gt=0, le=_MAX_YEARS)
+    must_be_completed: bool = False
+
+    @field_validator("work_description")
+    @classmethod
+    def _text(cls, value):
+        return _clean_text(value)
+
+
+class ProjectValueParams(_Strict):
+    min_value: float = Field(gt=0)
+    # One project of at least this value, the total of the cited projects,
+    # or their average.
+    basis: Literal["single", "total", "average"] = "single"
+    within_years: Optional[float] = Field(default=None, gt=0, le=_MAX_YEARS)
+
+
+class PersonnelParams(_Strict):
+    role: str
+    count: int = Field(default=1, ge=1, le=1000)
+    min_experience_years: Optional[float] = Field(default=None, ge=0, le=_MAX_YEARS)
+    # Which of the two experience figures an employee record holds the
+    # requirement is about: total professional, or with VGIL.
+    experience_basis: Literal["total", "vgil"] = "total"
+    qualification: Optional[str] = None
+    required_certifications: List[str] = Field(default_factory=list)
+
+    @field_validator("role")
+    @classmethod
+    def _role(cls, value):
+        return _required_text(value)
+
+    @field_validator("qualification")
+    @classmethod
+    def _text(cls, value):
+        return _clean_text(value)
+
+    @field_validator("required_certifications")
+    @classmethod
+    def _list(cls, value):
+        return _clean_list(value, MAX_REQUIRED_CERTIFICATIONS)
+
+
+class CertificationParams(_Strict):
+    """A certificate the bidding company must hold, e.g. ISO 9001. Not one of
+    the certificates *submitted* with the bid, which the tender lists
+    separately."""
+
+    name: str
+    issuing_body: Optional[str] = None
+    # The date it must still be valid on. Left empty, the submission date.
+    valid_on: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, value):
+        return _required_text(value)
+
+    @field_validator("issuing_body")
+    @classmethod
+    def _text(cls, value):
+        return _clean_text(value)
+
+    @field_validator("valid_on")
+    @classmethod
+    def _date(cls, value):
+        text = _clean_text(value)
+        if text is None:
+            return None
+        try:
+            date.fromisoformat(text)
+        except ValueError:
+            raise ValueError("must be a date in YYYY-MM-DD form")
+        return text
+
+
+class DocumentParams(_Strict):
+    document_type: str
+    description: Optional[str] = None
+    count: Optional[int] = Field(default=None, ge=1, le=1000)
+    validity_note: Optional[str] = None
+
+    @field_validator("document_type")
+    @classmethod
+    def _type(cls, value):
+        return _required_text(value)
+
+    @field_validator("description", "validity_note")
+    @classmethod
+    def _text(cls, value):
+        return _clean_text(value)
+
+
+class FinancialParams(_Strict):
+    metric: Literal[
+        "average_annual_turnover", "net_worth", "solvency", "working_capital", "other"
+    ]
+    min_amount: float = Field(ge=0)
+    # Over how many financial years, e.g. the average of the last three.
+    period_years: Optional[int] = Field(default=None, ge=1, le=20)
+    # What the figure is, when the metric is "other".
+    description: Optional[str] = None
+
+    @field_validator("description")
+    @classmethod
+    def _text(cls, value):
+        return _clean_text(value)
+
+    @model_validator(mode="after")
+    def _describe_other(self):
+        if self.metric == "other" and not self.description:
+            # A rule across two fields, so it names the one to fill in itself.
+            raise ValueError("Describe the requirement: required when the requirement is Other")
+        return self
+
+
+class OtherParams(_Strict):
+    description: str
+
+    @field_validator("description")
+    @classmethod
+    def _text(cls, value):
+        text = _clean_text(value, _MAX_LONG_TEXT)
+        if not text:
+            raise ValueError("is required")
+        return text
+
+
+class _CriterionFrame(_Strict):
+    """What every criterion carries, whatever its kind."""
+
+    mandatory: bool = True
+    clause_ref: Optional[str] = None
+    source_text: Optional[str] = None
+    notes: Optional[str] = None
+
+    @field_validator("clause_ref")
+    @classmethod
+    def _ref(cls, value):
+        return _clean_text(value, 200)
+
+    @field_validator("source_text", "notes")
+    @classmethod
+    def _long(cls, value):
+        return _clean_text(value, _MAX_LONG_TEXT)
+
+
+class SimilarProjectsCriterion(_CriterionFrame):
+    kind: Literal["similar_projects"]
+    params: SimilarProjectsParams
+
+
+class ProjectValueCriterion(_CriterionFrame):
+    kind: Literal["project_value"]
+    params: ProjectValueParams
+
+
+class PersonnelCriterion(_CriterionFrame):
+    kind: Literal["personnel"]
+    params: PersonnelParams
+
+
+class CertificationCriterion(_CriterionFrame):
+    kind: Literal["certification"]
+    params: CertificationParams
+
+
+class DocumentCriterion(_CriterionFrame):
+    kind: Literal["document"]
+    params: DocumentParams
+
+
+class FinancialCriterion(_CriterionFrame):
+    kind: Literal["financial"]
+    params: FinancialParams
+
+
+class OtherCriterion(_CriterionFrame):
+    kind: Literal["other"]
+    params: OtherParams
+
+
+# What a criterion POST or PUT carries. `kind` picks the params model, so an
+# unknown kind, a missing required field or a stray one is a 422. id,
+# category and the timestamps are the server's and are refused if sent.
+CriterionIn = Annotated[
+    Union[
+        SimilarProjectsCriterion,
+        ProjectValueCriterion,
+        PersonnelCriterion,
+        CertificationCriterion,
+        DocumentCriterion,
+        FinancialCriterion,
+        OtherCriterion,
+    ],
+    Field(discriminator="kind"),
+]
+
+
+_criterion_adapter = TypeAdapter(CriterionIn)
+
+# The label each field goes by in the criterion drawer, so an error names the
+# field the way the person filling it in sees it. Where one name means
+# different things in different kinds -- count, description -- the kind picks.
+_FIELD_LABELS = {
+    "kind": "Type",
+    "mandatory": "Requirement (mandatory or desirable)",
+    "clause_ref": "Clause reference",
+    "source_text": "Wording in the tender",
+    "notes": "Internal notes",
+    "params": "Details",
+    "work_description": "Nature of the work",
+    "min_value_each": "Minimum value of each",
+    "completed_within_years": "Within the last (years)",
+    "must_be_completed": "Must be completed, not ongoing",
+    "min_value": "Minimum value",
+    "basis": "Measured as",
+    "within_years": "Within the last (years)",
+    "role": "Role / designation",
+    "min_experience_years": "Minimum experience (years)",
+    "experience_basis": "Experience counted as",
+    "qualification": "Qualification",
+    "required_certifications": "Certifications held",
+    "name": "Certification",
+    "issuing_body": "Issuing body",
+    "valid_on": "Must be valid on",
+    "document_type": "Document type",
+    "validity_note": "Validity",
+    "metric": "Requirement",
+    "min_amount": "Minimum amount",
+    "period_years": "Over the last (financial years)",
+}
+_KIND_FIELD_LABELS = {
+    ("similar_projects", "count"): "Number of similar projects",
+    ("personnel", "count"): "Number of people",
+    ("document", "count"): "How many",
+    ("document", "description"): "Description",
+    ("financial", "description"): "Describe the requirement",
+    ("other", "description"): "Requirement",
+}
+
+# Pydantic's wording, where plainer wording says the same thing.
+_ERROR_TEXT = {
+    "missing": "is required",
+    "extra_forbidden": "is not an accepted field",
+    "finite_number": "must be a finite number, not Infinity or NaN",
+    "int_type": "must be a whole number",
+    "float_type": "must be a number",
+    "bool_type": "must be true or false",
+    "string_type": "must be text",
+    "list_type": "must be a list",
+    "dict_type": "must be an object",
+}
+
+
+# Range errors, as "must be at least 1" rather than pydantic's "Input should
+# be greater than or equal to 1". The bound comes from the error's context.
+_BOUND_TEXT = {
+    "greater_than_equal": ("ge", "must be at least"),
+    "greater_than": ("gt", "must be more than"),
+    "less_than_equal": ("le", "must be at most"),
+    "less_than": ("lt", "must be less than"),
+}
+
+
+def _criterion_error(error: Dict[str, Any], kind: Optional[str]) -> Dict[str, Any]:
+    """One pydantic error as FastAPI would report it, with the field's label
+    leading the message."""
+    loc = list(error.get("loc") or ())
+    # The discriminated union puts the matched kind first; it is not a field.
+    if kind and loc and loc[0] == kind:
+        loc = loc[1:]
+    kind_known = kind if kind in CRITERION_CATEGORIES else None
+    entry = loc[-1] if loc and isinstance(loc[-1], int) else None
+    names = [part for part in loc if isinstance(part, str)]
+    field = names[-1] if names else None
+
+    error_type = error.get("type", "")
+    if error_type.startswith("union_tag"):
+        label, text = "Type", (
+            "is required" if error_type == "union_tag_not_found"
+            else "must be one of " + ", ".join(sorted(CRITERION_CATEGORIES))
+        )
+    elif error_type == "extra_forbidden":
+        label, text = f"'{field}'", _ERROR_TEXT[error_type]
+    else:
+        label = _KIND_FIELD_LABELS.get((kind_known, field)) or _FIELD_LABELS.get(field)
+        if label is None:
+            label = (field or "Details").replace("_", " ").capitalize()
+        bound = _BOUND_TEXT.get(error_type)
+        ctx = error.get("ctx") or {}
+        text = _ERROR_TEXT.get(error_type)
+        if bound and bound[0] in ctx:
+            limit = ctx[bound[0]]
+            if isinstance(limit, float) and limit.is_integer():
+                limit = int(limit)
+            text = f"{bound[1]} {limit}"
+        elif error_type == "literal_error" and str(error.get("msg", "")).startswith("Input should be "):
+            text = "must be " + str(error["msg"])[len("Input should be "):]
+        elif text is None:
+            text = str(error.get("msg", "is not valid"))
+            if text.startswith("Value error, "):
+                text = text[len("Value error, "):]
+            if field == "params" and ":" in text:
+                # A rule across fields already names the one it is about.
+                label, text = (part.strip() for part in text.split(":", 1))
+            else:
+                text = text[:1].lower() + text[1:]
+        if entry is not None:
+            label = f"{label} (entry {entry + 1})"
+
+    return {
+        "type": error_type,
+        "loc": ["body", *error.get("loc", ())],
+        "msg": f"{label}: {text}",
+    }
+
+
+class CriterionValidationError(Exception):
+    """A criterion body that failed validation, with its labelled errors in
+    the shape FastAPI's own 422 uses."""
+
+    def __init__(self, errors: List[Dict[str, Any]]):
+        super().__init__(errors)
+        self.errors = errors
+
+
+def validate_criterion(data: Any) -> Any:
+    """Validate a criterion body, raising CriterionValidationError with one
+    labelled message per problem."""
+    try:
+        return _criterion_adapter.validate_python(data)
+    except ValidationError as exc:
+        kind = data.get("kind") if isinstance(data, dict) else None
+        raise CriterionValidationError(
+            [_criterion_error(error, kind) for error in exc.errors(include_url=False)]
+        )
+
+
+class CriterionOut(BaseModel):
+    """A stored criterion. `params` is returned as stored; its shape was
+    checked against `kind` on the way in."""
+
+    id: str
+    kind: str
+    category: str
+    mandatory: bool = True
+    clause_ref: Optional[str] = None
+    source_text: Optional[str] = None
+    notes: Optional[str] = None
+    params: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
 class TenderOut(TenderFields):
     id: str
     cost_items: List[CostItemOut] = Field(default_factory=list)
     certificates: List[TenderCertificateOut] = Field(default_factory=list)
+    # Deliberately absent from TenderIn: criteria change through their own
+    # endpoints, so saving the tender form can never drop them.
+    criteria: List[CriterionOut] = Field(default_factory=list)
     document_ids: List[str] = Field(default_factory=list)
+    # The past projects this bid cites as experience. Ids of existing
+    # projects, which the tender points at and does not own: a project is
+    # evidence in its own right and may be cited by any number of bids.
+    #
+    # Deliberately absent from TenderIn, like document_ids: citing is its own
+    # call, so a form posted from a stale page cannot drop evidence someone
+    # added in the meantime.
+    cited_project_ids: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -481,6 +991,41 @@ class TenderPage(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class CandidateOut(BaseModel):
+    """One record that passed a criterion's rules (app/matching.py), with the
+    reasons it passed and what could not be checked. Computed on request and
+    never stored."""
+
+    type: Literal["project", "employee", "document"]
+    id: str
+    title: str
+    subtitle: Optional[str] = None
+    reasons: List[str] = Field(default_factory=list)
+    missing: List[str] = Field(default_factory=list)
+    # A project already cited by this tender / a document already attached.
+    cited: bool = False
+    attached: bool = False
+    file_name: Optional[str] = None
+    owner_type: Optional[str] = None
+    owner_id: Optional[str] = None
+    owner_label: Optional[str] = None
+
+
+class CandidateResults(BaseModel):
+    """The candidates for one criterion. `mode` is "matched" when rules were
+    applied and "manual" when the criterion cannot be matched from recorded
+    data; `notes` say what was not, or could not be, checked."""
+
+    criterion_id: str
+    kind: str
+    mode: Literal["matched", "manual"]
+    summary: Optional[str] = None
+    notes: List[str] = Field(default_factory=list)
+    candidates: List[CandidateOut] = Field(default_factory=list)
+    total: int = 0
+    truncated: bool = False
 
 
 # ---------------------------------------------------------------------------

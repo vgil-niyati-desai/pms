@@ -28,7 +28,7 @@ from pymongo import DESCENDING, ReturnDocument
 from pymongo.collection import Collection
 
 from .. import schemas
-from ..mongodb import get_employee_records
+from ..mongodb import get_documents, get_employee_records
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
@@ -86,6 +86,122 @@ def _object_id(employee_id: str) -> ObjectId:
         return ObjectId(employee_id)
     except (InvalidId, TypeError):
         raise HTTPException(status_code=404, detail="Employee not found")
+
+
+# --------------------------------------------------------------------------
+# The document a CV or a certification points at
+#
+# The pointer used to run one way only: the nested record named its document
+# and the document said nothing about whose it was, so "which employee owns
+# this file?" could not be asked, and deleting the file left the CV pointing
+# at nothing. These keep the reverse -- documents.employee_id -- in step from
+# the server, the way the projects router keeps project_id in step with a
+# project's document_ids.
+#
+# Only employee_id is written. Which *CV version* a document belongs to is
+# already answered from the other side, by the cvs[].document_id naming it,
+# so a cv_id here would be a second copy of a fact that is not in doubt.
+#
+# None of these raises on a document that is missing. A nested record may
+# carry a pointer to a document someone deleted from the log, and editing
+# that CV has to keep working: a stale pointer is something to leave alone,
+# not something to fail a save over.
+# --------------------------------------------------------------------------
+
+
+def _document_oid(document_id: Optional[str]) -> Optional[ObjectId]:
+    """A document id as an ObjectId, or None if it is not one."""
+    if not document_id:
+        return None
+    try:
+        return ObjectId(document_id)
+    except (InvalidId, TypeError):
+        return None
+
+
+def _check_document_claim(
+    documents: Collection, document_id: Optional[str], employee_id: str
+) -> None:
+    """Refuse a document another employee already holds.
+
+    Read-only, and called before anything is written, so a rejected save
+    leaves both sides exactly as they were. The same answer the projects
+    router gives when two projects want one document: taking it would either
+    move it out of a record still showing it or leave two records claiming
+    it, and the way to give this person the same file is a copy of their own.
+    """
+    oid = _document_oid(document_id)
+    if oid is None:
+        return
+    record = documents.find_one({"_id": oid}, {"_id": 1, "employee_id": 1})
+    if record is None:
+        return
+    claimed_by = record.get("employee_id")
+    if claimed_by and claimed_by != employee_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This document already belongs to another employee. Remove it "
+                "from that person first, or upload a copy for this one."
+            ),
+        )
+
+
+def _claim_document(
+    documents: Collection, document_id: Optional[str], employee_id: str
+) -> None:
+    """Stamp employee_id on the document a nested record points at.
+
+    The filter repeats the check above rather than trusting it: between the
+    two, another request could have claimed the document, and this write must
+    not take it off them.
+    """
+    oid = _document_oid(document_id)
+    if oid is None:
+        return
+    documents.update_one(
+        {
+            "_id": oid,
+            "$or": [
+                {"employee_id": None},
+                {"employee_id": {"$exists": False}},
+                {"employee_id": employee_id},
+            ],
+        },
+        {"$set": {"employee_id": employee_id}},
+    )
+
+
+def _release_document(
+    documents: Collection, document_id: Optional[str], employee_id: str
+) -> None:
+    """Clear employee_id, but only where it names *this* employee.
+
+    The rule the projects router detaches by: a document someone else holds
+    is not this call's to unclaim, and one already gone matches nothing.
+    """
+    oid = _document_oid(document_id)
+    if oid is None:
+        return
+    documents.update_one(
+        {"_id": oid, "employee_id": employee_id}, {"$set": {"employee_id": None}}
+    )
+
+
+def _nested_document_id(
+    employees: Collection, employee_id: str, field: str, item_id: str
+) -> Optional[str]:
+    """The document a nested record points at *now*, before it is changed.
+
+    Read separately because the helpers below return the employee as it is
+    after the write, by which point the pointer being replaced is gone.
+    """
+    record = employees.find_one(
+        {"_id": _object_id(employee_id), f"{field}.id": item_id},
+        {f"{field}.$": 1},
+    )
+    items = (record or {}).get(field) or []
+    return items[0].get("document_id") if items else None
 
 
 # --------------------------------------------------------------------------
@@ -513,16 +629,28 @@ def update_employee(
 
 
 @router.delete("/{employee_id}", status_code=204)
-def delete_employee(employee_id: str, employees: Collection = Depends(get_employee_records)):
+def delete_employee(
+    employee_id: str,
+    employees: Collection = Depends(get_employee_records),
+    documents: Collection = Depends(get_documents),
+):
     """Delete the employee, embedded CVs and certifications included.
 
     Uploaded files are deliberately left in the document log — that is what
     the confirmation dialog promises ("Files already uploaded to the server
     are not deleted"), and it matches how deleting a project behaves.
+
+    What does not survive is the claim on them. A file left saying it is this
+    person's would be a pointer to an employee who cannot be opened, which is
+    exactly what deleting a project clears from its documents. update_many
+    rather than a walk over the nested records, because a document can name
+    the employee without any CV left pointing back at it.
     """
     record = employees.find_one_and_delete({"_id": _object_id(employee_id)})
     if not record:
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    documents.update_many({"employee_id": employee_id}, {"$set": {"employee_id": None}})
 
 
 # --------------------------------------------------------------------------
@@ -536,8 +664,17 @@ def delete_employee(employee_id: str, employees: Collection = Depends(get_employ
 
 
 def _add_nested(
-    employees: Collection, employee_id: str, field: str, values: Dict[str, Any]
+    employees: Collection,
+    documents: Collection,
+    employee_id: str,
+    field: str,
+    values: Dict[str, Any],
 ) -> Dict[str, Any]:
+    # Before the push, so a document another employee holds is refused with
+    # nothing written on either side.
+    document_id = values.get("document_id")
+    _check_document_claim(documents, document_id, employee_id)
+
     item = dict(values)
     item["id"] = str(ObjectId())  # time-ordered, like every other id here
     item["created_at"] = _now_utc_ms()
@@ -549,12 +686,28 @@ def _add_nested(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    # After the push, so an employee that turned out not to exist cannot
+    # leave a document stamped with their id.
+    _claim_document(documents, document_id, employee_id)
     return _serialise(updated)
 
 
 def _update_nested(
-    employees: Collection, employee_id: str, field: str, item_id: str, values: Dict[str, Any]
+    employees: Collection,
+    documents: Collection,
+    employee_id: str,
+    field: str,
+    item_id: str,
+    values: Dict[str, Any],
 ) -> Dict[str, Any]:
+    document_id = values.get("document_id")
+    _check_document_claim(documents, document_id, employee_id)
+    # Read before the write, because afterwards nothing is left to say which
+    # document this record used to point at. Replacing a CV's file reuses the
+    # same document, so these are normally equal and nothing is released.
+    previous_document_id = _nested_document_id(employees, employee_id, field, item_id)
+
     # The positional $ writes into the array element the query matched, field
     # by field, which is what preserves the item's id and created_at.
     changes = {f"{field}.$.{key}": value for key, value in values.items()}
@@ -569,12 +722,20 @@ def _update_nested(
         # The employee is missing, or the item is — either way the thing
         # being edited is not there.
         raise HTTPException(status_code=404, detail="Record not found")
+
+    if previous_document_id and previous_document_id != document_id:
+        _release_document(documents, previous_document_id, employee_id)
+    _claim_document(documents, document_id, employee_id)
     return _serialise(updated)
 
 
 def _remove_nested(
-    employees: Collection, employee_id: str, field: str, item_id: str
+    employees: Collection, documents: Collection, employee_id: str, field: str, item_id: str
 ) -> Dict[str, Any]:
+    # Read while the record is still there; after the pull its pointer is
+    # gone with it.
+    document_id = _nested_document_id(employees, employee_id, field, item_id)
+
     # The query insists the item exists, so removing something already gone
     # is a 404 rather than a silent success — deleting twice should say so.
     updated = employees.find_one_and_update(
@@ -584,6 +745,10 @@ def _remove_nested(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Record not found")
+
+    # The file stays in the log — deleting it is the caller's own,
+    # separate call — but it is no longer this employee's.
+    _release_document(documents, document_id, employee_id)
     return _serialise(updated)
 
 
@@ -592,8 +757,9 @@ def add_cv(
     employee_id: str,
     payload: schemas.CvIn,
     employees: Collection = Depends(get_employee_records),
+    documents: Collection = Depends(get_documents),
 ):
-    return _add_nested(employees, employee_id, "cvs", payload.model_dump())
+    return _add_nested(employees, documents, employee_id, "cvs", payload.model_dump())
 
 
 @router.put("/{employee_id}/cvs/{cv_id}", response_model=schemas.EmployeeOut)
@@ -602,8 +768,11 @@ def update_cv(
     cv_id: str,
     payload: schemas.CvIn,
     employees: Collection = Depends(get_employee_records),
+    documents: Collection = Depends(get_documents),
 ):
-    return _update_nested(employees, employee_id, "cvs", cv_id, payload.model_dump())
+    return _update_nested(
+        employees, documents, employee_id, "cvs", cv_id, payload.model_dump()
+    )
 
 
 @router.delete("/{employee_id}/cvs/{cv_id}", response_model=schemas.EmployeeOut)
@@ -611,10 +780,12 @@ def delete_cv(
     employee_id: str,
     cv_id: str,
     employees: Collection = Depends(get_employee_records),
+    documents: Collection = Depends(get_documents),
 ):
     """Remove one CV version. Its uploaded file is the caller's to delete
-    through the documents endpoint first, which is what the drawer does."""
-    return _remove_nested(employees, employee_id, "cvs", cv_id)
+    through the documents endpoint first, which is what the drawer does; if
+    it is kept, it is released rather than left saying it is this person's."""
+    return _remove_nested(employees, documents, employee_id, "cvs", cv_id)
 
 
 @router.post("/{employee_id}/certifications", response_model=schemas.EmployeeOut, status_code=201)
@@ -622,8 +793,11 @@ def add_certification(
     employee_id: str,
     payload: schemas.CertificationIn,
     employees: Collection = Depends(get_employee_records),
+    documents: Collection = Depends(get_documents),
 ):
-    return _add_nested(employees, employee_id, "certifications", payload.model_dump())
+    return _add_nested(
+        employees, documents, employee_id, "certifications", payload.model_dump()
+    )
 
 
 @router.put("/{employee_id}/certifications/{certification_id}", response_model=schemas.EmployeeOut)
@@ -632,9 +806,15 @@ def update_certification(
     certification_id: str,
     payload: schemas.CertificationIn,
     employees: Collection = Depends(get_employee_records),
+    documents: Collection = Depends(get_documents),
 ):
     return _update_nested(
-        employees, employee_id, "certifications", certification_id, payload.model_dump()
+        employees,
+        documents,
+        employee_id,
+        "certifications",
+        certification_id,
+        payload.model_dump(),
     )
 
 
@@ -645,5 +825,8 @@ def delete_certification(
     employee_id: str,
     certification_id: str,
     employees: Collection = Depends(get_employee_records),
+    documents: Collection = Depends(get_documents),
 ):
-    return _remove_nested(employees, employee_id, "certifications", certification_id)
+    return _remove_nested(
+        employees, documents, employee_id, "certifications", certification_id
+    )

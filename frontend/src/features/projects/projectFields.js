@@ -14,10 +14,3 @@ export const DOCUMENT_TYPES = EVIDENCE_TYPES;
 // Re-exported so the Projects screens keep importing their helpers from one
 // place, while the formatting itself is shared with the other areas.
 export { dash, formatPeriod, formatTimestamp } from "../../lib/format";
-
-/** { [documentId]: document_type } for the has-document filter and the pills. */
-export function documentTypeIndex(documents) {
-  const index = {};
-  for (const document of documents || []) index[document.id] = document.document_type;
-  return index;
-}

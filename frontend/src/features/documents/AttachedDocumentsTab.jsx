@@ -3,6 +3,7 @@ import DataTable from "../../components/DataTable";
 import EmptyState from "../../components/EmptyState";
 import Field from "../../components/Field";
 import FileViewLink from "../../components/FileViewLink";
+import StatusPill from "../../components/StatusPill";
 import { dash } from "../../lib/format";
 
 /**
@@ -32,9 +33,23 @@ export default function AttachedDocumentsTab({
   error,
   onOpen,
   onAdd,
+  typeFilter: controlledTypeFilter,
+  onTypeFilterChange,
   emptyMessage = "No documents attached yet.",
 }) {
-  const [typeFilter, setTypeFilter] = useState("");
+  // The filter is this tab's own state unless an owner drives it. The
+  // project screen does, so that clicking a held evidence pill can land
+  // here already narrowed to that type and the query string can carry it;
+  // anything passing neither prop keeps the local state it always had.
+  const [ownTypeFilter, setOwnTypeFilter] = useState("");
+  const controlled = controlledTypeFilter !== undefined;
+  const typeFilter = controlled ? controlledTypeFilter : ownTypeFilter;
+  const setTypeFilter = controlled ? onTypeFilterChange : setOwnTypeFilter;
+
+  // Only when there is nothing on screen yet. A reload after a save keeps
+  // the rows in place, the way the page around it has since the loading
+  // check was put on the record itself.
+  const initialLoading = loading && documents.length === 0;
 
   const filtered = typeFilter
     ? documents.filter((document) => document.document_type === typeFilter)
@@ -48,9 +63,18 @@ export default function AttachedDocumentsTab({
   const columns = [
     {
       key: "reference_number",
-      header: "Reference no.",
+      // Both halves of what identifies a document at a glance, stacked in
+      // the column that leads the row: the reference it is filed under and
+      // the file it actually is. The file name used to be reachable only by
+      // opening the preview.
+      header: "Reference & file",
       className: "cell-name",
-      render: (d) => dash(d.reference_number),
+      render: (d) => (
+        <div className="doc-cell">
+          <span className="doc-cell-ref">{dash(d.reference_number)}</span>
+          {d.file_name && <span className="doc-cell-file">{d.file_name}</span>}
+        </div>
+      ),
     },
     {
       key: "document_date",
@@ -59,7 +83,10 @@ export default function AttachedDocumentsTab({
       render: (d) => dash(d.document_date),
     },
     { key: "category", header: "Category", render: (d) => dash(d.category) },
-    { key: "submitted_by", header: "Added by" },
+    // dash(), like every other optional column: without it a record with no
+    // submitted_by renders an empty cell rather than the "—" the rest of the
+    // row uses for the same thing.
+    { key: "submitted_by", header: "Added by", render: (d) => dash(d.submitted_by) },
     {
       key: "file",
       header: "File",
@@ -89,7 +116,7 @@ export default function AttachedDocumentsTab({
   return (
     <section className="card">
       <div className="list-head">
-        <h3>Documents {!loading && `(${documents.length})`}</h3>
+        <h3>Documents {!initialLoading && `(${documents.length})`}</h3>
         <button type="button" className="btn btn-primary" onClick={() => onAdd()}>
           + Add document
         </button>
@@ -116,7 +143,7 @@ export default function AttachedDocumentsTab({
         </div>
       )}
 
-      {loading ? (
+      {initialLoading ? (
         <p className="muted">Loading...</p>
       ) : groups.length === 0 ? (
         <EmptyState
@@ -136,10 +163,19 @@ export default function AttachedDocumentsTab({
       ) : (
         groups.map((group) => (
           <div key={group.type} className="doc-group">
-            <h4>
-              {group.type} <span className="muted">({group.rows.length})</span>
+            {/* The type carries the colour it already has everywhere else in
+                the app, so a group is recognised by the same pill the
+                document log and the evidence strip use. */}
+            <h4 className="doc-group-head">
+              <StatusPill value={group.type} />
+              <span className="doc-group-count">
+                {group.rows.length} {group.rows.length === 1 ? "document" : "documents"}
+              </span>
             </h4>
-            <DataTable columns={columns} rows={group.rows} empty={null} />
+            {/* Opening a row opens the record, the way every other table on
+                the app does it. The Open button stays for the affordance, and
+                DataTable ignores clicks that land on a control. */}
+            <DataTable columns={columns} rows={group.rows} empty={null} onRowClick={onOpen} />
           </div>
         ))
       )}

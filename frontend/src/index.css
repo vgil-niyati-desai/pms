@@ -443,6 +443,33 @@ img {
   color: #97330A;
 }
 
+/* A confirmation that something worked, with a way to put it away before it
+   times out on its own. The text takes the width and the control keeps its
+   own, so a long sentence wraps rather than squeezing the button. */
+.notice-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.notice-dismiss {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  padding: 0 2px;
+  font-size: 17px;
+  line-height: 1.2;
+  font-family: inherit;
+  color: inherit;
+  opacity: 0.55;
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+  transition: opacity var(--fast) var(--ease);
+}
+.notice-dismiss:hover {
+  opacity: 1;
+}
+
 /* ---- forms ----------------------------------------------------------- */
 
 label {
@@ -873,6 +900,14 @@ tbody td:first-child {
 .tag-purchase-order { background: var(--amber-soft); color: var(--amber); }
 .tag-contract { background: var(--teal-soft); color: var(--teal); }
 
+/* Tender document types, read as the order they arrive in: the notice, any
+   change to it, what we sent, what came back. "Other" is deliberately left
+   to the neutral pill -- it is the absence of a type, not one of its own. */
+.tag-tender-notice { background: var(--accent-soft); color: var(--accent); }
+.tag-corrigendum { background: var(--amber-soft); color: var(--amber); }
+.tag-submitted-bid { background: var(--plum-soft); color: var(--plum); }
+.tag-award-letter { background: var(--good-soft); color: var(--good); }
+
 /* Project status */
 .tag-ongoing { background: var(--accent-soft); color: var(--accent); }
 .tag-completed { background: var(--good-soft); color: var(--good); }
@@ -890,6 +925,10 @@ tbody td:first-child {
 .tag-won { background: var(--good-soft); color: var(--good); }
 .tag-lost { background: var(--warn-soft); color: var(--warn); }
 .tag-withdrawn { background: var(--paper); color: var(--ink-faint); }
+
+/* Qualification criteria: a condition of the bid, or only in its favour. */
+.tag-mandatory { background: var(--accent-soft); color: var(--accent); }
+.tag-desirable { background: var(--paper); color: var(--ink-soft); }
 
 .tag-neutral {
   gap: 3px;
@@ -1314,9 +1353,31 @@ tbody td:first-child {
   line-height: 1.25;
   letter-spacing: -0.022em;
 }
+/* The status sits on the title's line. `baseline` rather than `center` so a
+   title that wraps to two lines keeps the pill against its first line, where
+   the eye is, instead of floating to the middle of the block. */
+.detail-title-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-width: 0;
+}
+.detail-subtitle-label {
+  margin-right: 8px;
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+}
+/* The client is the record's other half of the answer to "what is this",
+   so it is set as an identifying line rather than as a caption under the
+   title -- the same size, but carrying enough weight to be read as a name. */
 .detail-subtitle {
-  margin: 4px 0 0 0;
+  margin: 5px 0 0 0;
   font-size: 14px;
+  font-weight: 550;
   overflow-wrap: anywhere;
 }
 .detail-actions {
@@ -1325,11 +1386,13 @@ tbody td:first-child {
   gap: 8px;
   flex-shrink: 0;
 }
+/* Clear of the facts grid above: at 16px the badges sat inside that grid's
+   own 18px row gap and read as one more row of it. */
 .detail-badges {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 16px;
+  margin-top: 20px;
 }
 
 .detail-facts {
@@ -1347,6 +1410,11 @@ tbody td:first-child {
   margin-top: 20px;
   padding-top: 20px;
   border-top: 1px solid var(--line-soft);
+}
+/* The four header facts are the ones read at a glance, so they are set a
+   step larger than the same grid used inside a card. */
+.detail-header .detail-facts dd {
+  font-size: 15px;
 }
 .detail-facts-wide {
   margin-top: 0;
@@ -1439,6 +1507,19 @@ tbody td:first-child {
   border-color: #CDEADC;
   color: var(--good);
 }
+/* Held reads as settled: filled and solid. Missing reads as an outline
+   waiting to be filled -- same size and position, so the difference is the
+   treatment rather than the shape. */
+.evidence-card .evidence-yes {
+  box-shadow: inset 2px 0 0 var(--good);
+}
+.evidence-card .evidence-no {
+  background: transparent;
+}
+.evidence-card .evidence-action:hover,
+.evidence-card .evidence-action:focus-visible {
+  background: var(--accent-soft);
+}
 .evidence-no {
   background: var(--paper-2);
   color: var(--ink-faint);
@@ -1451,11 +1532,130 @@ tbody td:first-child {
   transition: background var(--fast) var(--ease), color var(--fast) var(--ease),
     border-color var(--fast) var(--ease);
 }
-.evidence-action:hover {
+.evidence-action:hover,
+.evidence-action:focus-visible {
   background: var(--accent-soft);
   color: var(--accent);
   border-color: var(--accent-line);
   border-style: solid;
+}
+
+/* The state mark leads the pill and holds the same width whichever state it
+   is in, so a wrapped strip reads down its marks instead of making the eye
+   find a glyph at the end of five labels of different lengths. */
+.evidence-mark {
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+  font-weight: 700;
+  line-height: 1;
+}
+.evidence-compact .evidence-mark {
+  width: 9px;
+}
+/* A held pill that leads to its documents keeps its own colour on hover.
+   Borrowing the accent the missing pills use would read as the state
+   changing under the pointer rather than as somewhere to go. */
+.evidence-yes.evidence-action:hover,
+.evidence-yes.evidence-action:focus-visible {
+  background: #D5EFE3;
+  color: #0C6247;
+  border-color: #A9DCC4;
+  border-style: solid;
+}
+.evidence-label {
+  min-width: 0;
+}
+/* Kept apart from the mark because they answer different questions: the mark
+   says whether the document is held, the plus says what clicking will do. */
+.evidence-add {
+  flex-shrink: 0;
+  margin-left: 2px;
+  font-weight: 700;
+  opacity: 0.5;
+  transition: opacity var(--fast) var(--ease);
+}
+.evidence-action:hover .evidence-add,
+.evidence-action:focus-visible .evidence-add {
+  opacity: 1;
+}
+
+/* The strip is what the card is for, so it is separated from the sentence
+   above it rather than running on from it. */
+.evidence-card .list-head {
+  margin-bottom: 10px;
+}
+/* The hint's own top margin assumes it follows a heading directly; here the
+   head above owns that gap, so it is not paid twice. */
+.evidence-card .hint {
+  margin-top: 0;
+}
+/* How far off being citable this project is, before the sentence is read.
+   Empty when nothing is attached, which is itself the answer. */
+.evidence-meter {
+  height: 5px;
+  margin-top: 12px;
+  border-radius: var(--radius-pill);
+  background: var(--line-soft);
+  overflow: hidden;
+}
+.evidence-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--good);
+  transition: width var(--fast) var(--ease);
+}
+
+/* On the record screen the five types are a set to be read down, not a
+   sentence to be read along: one tile each, equal width, wrapping to fewer
+   columns as the screen narrows rather than leaving a ragged last line. */
+.evidence-card .evidence-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(172px, 100%), 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+.evidence-card .evidence-item {
+  width: 100%;
+  justify-content: flex-start;
+  padding: 10px 13px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  text-align: left;
+}
+/* The action goes to the far edge of its own tile, so the five of them line
+   up instead of each sitting wherever its label happened to end. */
+.evidence-card .evidence-add {
+  margin-left: auto;
+  padding-left: 8px;
+}
+.evidence-count {
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Scope and notes under one heading, each with its own quiet sub-label, so a
+   blank one still says which field is blank. */
+.project-prose h4 {
+  margin: 0 0 6px 0;
+}
+.project-prose h4 + p {
+  margin-top: 0;
+}
+.project-prose > *:not(:last-child) {
+  margin-bottom: 0;
+}
+.project-prose h4:not(:first-child) {
+  margin-top: 18px;
+}
+/* The marks are still showing the previous answer while the document log is
+   re-read after a save. Held back rather than hidden: the strip keeps its
+   place, and does not assert a state it is in the middle of rechecking. */
+.evidence-busy {
+  opacity: 0.55;
+  transition: opacity var(--fast) var(--ease);
 }
 
 /* ---- documents and costs --------------------------------------------- */
@@ -1471,6 +1671,46 @@ tbody td:first-child {
   padding-bottom: 8px;
   border-bottom: 1px solid var(--line-soft);
   margin-bottom: 12px;
+}
+/* The heading carries the type as the same pill it wears everywhere else, so
+   the uppercasing and tracking a plain section rule wants are dropped — they
+   would fight the pill sitting inside it. Two classes, so this wins over the
+   `.doc-group h4` rule above rather than racing it. */
+.doc-group .doc-group-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  text-transform: none;
+  letter-spacing: normal;
+  padding-bottom: 10px;
+}
+.doc-group-count {
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+/* The leading cell of a document row: what it is filed as, over what it
+   actually is. Two lines rather than two columns, because the file name is
+   long and the row has narrow columns after it. */
+.doc-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.doc-cell-ref {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.doc-cell-file {
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--ink-faint);
+  overflow-wrap: anywhere;
 }
 
 /* The one figure the costs tab exists to produce, set apart from the rows
@@ -1633,6 +1873,71 @@ tbody td:first-child {
   border: 1px solid var(--line-soft);
   font-size: 13px;
 }
+/* ---- attach an existing document ------------------------------------- */
+
+/* The picker that shares the Add Document drawer with the upload form. The
+   segmented control above it owns the gap, so the panel starts flush. */
+.attach-existing {
+  min-width: 0;
+}
+.attach-existing .segmented {
+  margin-bottom: 14px;
+}
+.attach-existing-lead {
+  margin-top: 0;
+  margin-bottom: 14px;
+}
+.attach-list {
+  list-style: none;
+  margin: 10px 0 0 0;
+  padding: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.attach-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--card);
+}
+.attach-row:last-child {
+  border-bottom: none;
+}
+.attach-row:hover {
+  background: var(--paper-2);
+}
+/* The text side gives up its width first; the action keeps its own. */
+.attach-row-main {
+  min-width: 0;
+}
+.attach-row-action {
+  flex-shrink: 0;
+}
+.attach-row-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.attach-row-ref {
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.attach-row-meta,
+.attach-row-file {
+  margin: 4px 0 0 0;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.attach-row-file {
+  color: var(--ink-faint);
+}
+
 .drawer-preview {
   margin-top: 24px;
   border-top: 1px solid var(--line-soft);
@@ -2327,6 +2632,17 @@ img.file-preview-fill {
      to, rather than shrinking the text that identifies it to nothing. */
   .redact-review-item {
     flex-wrap: wrap;
+  }
+  /* Same reasoning in the attach picker: Attach drops under the document it
+     belongs to instead of squeezing the reference and file name. */
+  .attach-row {
+    flex-wrap: wrap;
+  }
+  .attach-row-action {
+    width: 100%;
+  }
+  .attach-row-action .btn {
+    width: 100%;
   }
   .form-row {
     grid-template-columns: 1fr;

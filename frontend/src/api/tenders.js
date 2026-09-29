@@ -201,11 +201,61 @@ export const deleteCertificate = (tenderId, certificateId) =>
     fallback: "Failed to delete this certificate",
   });
 
+// --- qualification criteria ---------------------------------------------
+//
+// A criterion is sent whole: its kind, the frame every criterion shares, and
+// the params for that kind (see features/tenders/criteriaFields.js). Each
+// call returns the updated tender, like the nested records above.
+
+export const addCriterion = (tenderId, criterion) =>
+  requestJson(`/tenders/${tenderId}/criteria`, {
+    method: "POST",
+    body: JSON.stringify(criterion),
+    fallback: "Failed to save this criterion",
+  });
+
+export const updateCriterion = (tenderId, criterionId, criterion) =>
+  requestJson(`/tenders/${tenderId}/criteria/${criterionId}`, {
+    method: "PUT",
+    body: JSON.stringify(criterion),
+    fallback: "Failed to save this criterion",
+  });
+
+export const deleteCriterion = (tenderId, criterionId) =>
+  requestJson(`/tenders/${tenderId}/criteria/${criterionId}`, {
+    method: "DELETE",
+    fallback: "Failed to delete this criterion",
+  });
+
+/**
+ * The records that meet one criterion, by fixed rules on recorded data:
+ * `{ mode, summary, notes, candidates, total, truncated }`. Read-only --
+ * nothing is stored, and a result is only ever a suggestion.
+ */
+export const getCriterionCandidates = (tenderId, criterionId) =>
+  requestJson(`/tenders/${tenderId}/criteria/${criterionId}/candidates`, {
+    fallback: "Failed to find candidates for this criterion",
+  });
+
 // --- attached documents -------------------------------------------------
 //
 // Dedicated endpoints, like a project's: the server appends or removes the
 // link in one operation, so two people attaching documents at the same time
 // cannot overwrite each other.
+
+/**
+ * The documents attached to one tender, newest first.
+ *
+ * Resolved server-side. The detail screen used to download the whole document
+ * log and match it against the tender's document_ids in the browser, so
+ * opening any tender paid for every CV, project evidence file and unattached
+ * entry in the system.
+ */
+export async function listTenderDocuments(tenderId) {
+  return requestJson(`/tenders/${tenderId}/documents`, {
+    fallback: "Failed to load this tender's documents",
+  });
+}
 
 export async function linkDocument(tenderId, documentId) {
   return requestJson(`/tenders/${tenderId}/documents/${documentId}`, {
@@ -218,6 +268,39 @@ export async function unlinkDocument(tenderId, documentId) {
   return requestJson(`/tenders/${tenderId}/documents/${documentId}`, {
     method: "DELETE",
     fallback: "Failed to detach this document from the tender",
+  });
+}
+
+// --- cited projects -----------------------------------------------------
+//
+// The past work a bid puts forward as experience. A tender points at projects
+// and does not own them: a project is evidence in its own right and may be
+// cited by any number of bids at once, so citing is never exclusive and
+// nothing is written to the project.
+//
+// This is not the project a won tender produced, and it does not reach the
+// project's documents -- a tender's Documents tab and the projects it cites
+// are two separate lists.
+
+/** The projects this tender cites, most recently updated first. */
+export async function listTenderProjects(tenderId) {
+  return requestJson(`/tenders/${tenderId}/projects`, {
+    fallback: "Failed to load the projects this tender cites",
+  });
+}
+
+/** Cite a project. Idempotent: citing one already cited is a no-op. */
+export async function citeProject(tenderId, projectId) {
+  return requestJson(`/tenders/${tenderId}/projects/${projectId}`, {
+    method: "POST",
+    fallback: "Failed to cite this project",
+  });
+}
+
+export async function unciteProject(tenderId, projectId) {
+  return requestJson(`/tenders/${tenderId}/projects/${projectId}`, {
+    method: "DELETE",
+    fallback: "Failed to remove this project from the tender",
   });
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import DataTable from "../../components/DataTable";
 import EmptyState from "../../components/EmptyState";
@@ -11,23 +11,11 @@ import CheckboxGroup from "../../components/CheckboxGroup";
 import TagInput from "../../components/TagInput";
 import TagChip from "../../components/TagChip";
 import Pagination from "../../components/Pagination";
+import useHandoffNotice from "../../hooks/useHandoffNotice";
 import useQueryParams from "../../hooks/useQueryParams";
 import useResource from "../../hooks/useResource";
-import { listDocuments } from "../../api/documents";
-import {
-  listProjects,
-  listClients,
-  listTags,
-  documentTypesFor,
-  PROJECT_STATUSES,
-} from "../../api/projects";
-import {
-  EVIDENCE_TYPES,
-  dash,
-  formatPeriod,
-  formatTimestamp,
-  documentTypeIndex,
-} from "./projectFields";
+import { listProjects, listClients, listTags, PROJECT_STATUSES } from "../../api/projects";
+import { EVIDENCE_TYPES, dash, formatPeriod, formatTimestamp } from "./projectFields";
 import EvidenceStrip from "./EvidenceStrip";
 import { paths } from "../../app/routes";
 
@@ -48,16 +36,16 @@ const FILTER_SCHEMA = {
 export default function ProjectsListPage() {
   const navigate = useNavigate();
   const { values, setValues, clear } = useQueryParams(FILTER_SCHEMA);
+  // Handed over by the project form after a delete: the record it confirms
+  // no longer exists, so this is the only screen left to say it on.
+  const [notice, setNotice] = useHandoffNotice();
 
-  // Document types live on the documents API. Both the has-document filter and
-  // the evidence pills need them, so they are loaded once for the screen.
-  const loadDocuments = useCallback(() => listDocuments(), []);
-  const documents = useResource(loadDocuments, { initialData: [] });
-  const documentTypeById = useMemo(() => documentTypeIndex(documents.data), [documents.data]);
-
+  // Each project arrives carrying the document types it holds, resolved by
+  // the server for the projects on this page. The screen used to download
+  // the entire document log and work that out for itself.
   const loadProjects = useCallback(
-    () => listProjects({ ...values, pageSize: PAGE_SIZE, documentTypeById }),
-    [values, documentTypeById],
+    () => listProjects({ ...values, pageSize: PAGE_SIZE }),
+    [values],
   );
   const projects = useResource(loadProjects, { initialData: { items: [], total: 0 } });
 
@@ -137,7 +125,7 @@ export default function ProjectsListPage() {
       key: "documents",
       header: "Documents",
       render: (project) => (
-        <EvidenceStrip compact heldTypes={documentTypesFor(project, documentTypeById)} />
+        <EvidenceStrip compact heldTypes={project.document_types || []} />
       ),
     },
     {
@@ -168,6 +156,20 @@ export default function ProjectsListPage() {
 
   return (
     <div className="list-layout">
+      {notice && (
+        <div className="alert alert-success notice-bar" role="status">
+          <span>{notice}</span>
+          <button
+            type="button"
+            className="notice-dismiss"
+            onClick={() => setNotice(null)}
+            aria-label="Dismiss this message"
+          >
+            &times;
+          </button>
+        </div>
+      )}
+
       <FilterBar
         showClear={filtering}
         onClear={clear}
@@ -250,12 +252,6 @@ export default function ProjectsListPage() {
         <FilterChips chips={chips} />
 
         {projects.error && <div className="alert alert-error">{projects.error}</div>}
-        {documents.error && (
-          <div className="alert alert-error">
-            Documents could not be loaded ({documents.error}). The evidence column and the
-            has-document filter stay empty until the backend is reachable.
-          </div>
-        )}
 
         <DataTable
           columns={columns}

@@ -22,12 +22,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from pymongo import DESCENDING, ReturnDocument
 from pymongo.collection import Collection
 
-from .. import schemas
-from ..mongodb import get_documents, get_tender_records
+from .. import matching, schemas
+from ..mongodb import (
+    get_documents,
+    get_employee_records,
+    get_project_records,
+    get_tender_records,
+)
+from .documents_mongo import serialise_document
+from .projects_mongo import serialise_project, types_by_project
 
 router = APIRouter(prefix="/tenders", tags=["tenders"])
 
@@ -79,6 +86,10 @@ def _serialise(doc: Dict[str, Any]) -> Dict[str, Any]:
     out.setdefault("cost_items", [])
     out.setdefault("certificates", [])
     out.setdefault("document_ids", [])
+    out.setdefault("cited_project_ids", [])
+    # Tenders saved before criteria existed have no such field; they read as
+    # having none recorded, with no migration needed.
+    out.setdefault("criteria", [])
     return out
 
 
@@ -276,6 +287,8 @@ def create_tender(
     record["cost_items"] = []
     record["certificates"] = []
     record["document_ids"] = []
+    record["cited_project_ids"] = []
+    record["criteria"] = []
     record["created_at"] = now
     record["updated_at"] = now
 
@@ -292,9 +305,10 @@ def update_tender(
 ):
     """Replace the editable fields.
 
-    Cost items, certificates and document links are not among them: each
-    changes through its own endpoint, so a form submitted from a stale page
-    cannot silently drop a payment someone recorded in the meantime.
+    Cost items, certificates, criteria and document links are not among
+    them: each changes through its own endpoint, so a form submitted from a
+    stale page cannot silently drop a payment someone recorded in the
+    meantime.
     """
     changes = payload.model_dump()
     changes["updated_at"] = _now_utc_ms()
@@ -310,16 +324,28 @@ def update_tender(
 
 
 @router.delete("/{tender_id}", status_code=204)
-def delete_tender(tender_id: str, tenders: Collection = Depends(get_tender_records)):
-    """Delete the tender, embedded cost items and certificates included.
+def delete_tender(
+    tender_id: str,
+    tenders: Collection = Depends(get_tender_records),
+    documents: Collection = Depends(get_documents),
+):
+    """Delete the tender, embedded cost items, certificates and criteria
+    included.
 
     Uploaded files and attached documents stay in the document log — the
     confirmation dialog says so, and a receipt may still matter to accounts
     long after the bid is closed.
+
+    What does not stay is the claim on them. A document still naming this
+    tender would point at a record that cannot be opened, which is what
+    deleting a project clears from its documents and deleting an employee
+    clears from theirs.
     """
     record = tenders.find_one_and_delete({"_id": _object_id(tender_id)})
     if not record:
         raise HTTPException(status_code=404, detail="Tender not found")
+
+    documents.update_many({"tender_id": tender_id}, {"$set": {"tender_id": None}})
     return Response(status_code=204)
 
 
@@ -437,10 +463,334 @@ def delete_certificate(
 
 
 # --------------------------------------------------------------------------
+# Qualification criteria — embedded like cost items, but each carries its own
+# updated_at, and a criterion's kind is fixed once added: its params were
+# validated for that kind, so a different kind is a different criterion.
+# --------------------------------------------------------------------------
+
+
+def _validated_criterion(body: Any) -> Any:
+    """The body as a validated criterion, or a 422 in FastAPI's usual shape
+    whose every message starts with the label of the field it is about."""
+    try:
+        return schemas.validate_criterion(body)
+    except schemas.CriterionValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors)
+
+
+def _criterion_values(payload: Any, now: datetime) -> Dict[str, Any]:
+    """The stored form of a validated criterion. `category` is derived from
+    the kind here, never taken from the client."""
+    values = payload.model_dump()
+    values["category"] = schemas.CRITERION_CATEGORIES[values["kind"]]
+    values["updated_at"] = now
+    return values
+
+
+@router.post("/{tender_id}/criteria", response_model=schemas.TenderOut, status_code=201)
+def add_criterion(
+    tender_id: str,
+    body: Any = Body(...),
+    tenders: Collection = Depends(get_tender_records),
+):
+    """Record one qualification criterion.
+
+    The cap is enforced inside the same write: the update only matches while
+    the list has room, so two requests racing for the last slot cannot both
+    land.
+    """
+    oid = _object_id(tender_id)
+    payload = _validated_criterion(body)
+    now = _now_utc_ms()
+    item = _criterion_values(payload, now)
+    item["id"] = str(ObjectId())
+    item["created_at"] = now
+
+    updated = tenders.find_one_and_update(
+        {"_id": oid, f"criteria.{schemas.MAX_CRITERIA - 1}": {"$exists": False}},
+        {"$push": {"criteria": item}, "$set": {"updated_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is None:
+        if tenders.count_documents({"_id": oid}, limit=1) == 0:
+            raise HTTPException(status_code=404, detail="Tender not found")
+        raise HTTPException(
+            status_code=409,
+            detail=f"A tender can hold at most {schemas.MAX_CRITERIA} criteria.",
+        )
+    return _serialise(updated)
+
+
+@router.put("/{tender_id}/criteria/{criterion_id}", response_model=schemas.TenderOut)
+def update_criterion(
+    tender_id: str,
+    criterion_id: str,
+    body: Any = Body(...),
+    tenders: Collection = Depends(get_tender_records),
+):
+    """Replace one criterion's contents, keeping its id and created_at."""
+    oid = _object_id(tender_id)
+    payload = _validated_criterion(body)
+    record = tenders.find_one({"_id": oid}, {"criteria": 1})
+    if record is None:
+        raise HTTPException(status_code=404, detail="Tender not found")
+    criteria = record.get("criteria") or []
+    index = next(
+        (i for i, item in enumerate(criteria) if item.get("id") == criterion_id), None
+    )
+    if index is None:
+        raise HTTPException(status_code=404, detail="Criterion not found")
+    current = criteria[index]
+    if current.get("kind") != payload.kind:
+        raise HTTPException(
+            status_code=400,
+            detail="A criterion's type cannot be changed. Delete it and add a new one.",
+        )
+
+    # Written by position, with the filter re-checking that the element at
+    # that position is still this criterion: if another request removed or
+    # moved it since the read, nothing matches and the answer is a 404 rather
+    # than an edit landing on its neighbour.
+    now = _now_utc_ms()
+    prefix = f"criteria.{index}"
+    changes = {f"{prefix}.{key}": value for key, value in _criterion_values(payload, now).items()}
+    changes["updated_at"] = now
+    updated = tenders.find_one_and_update(
+        {"_id": oid, f"{prefix}.id": criterion_id},
+        {"$set": changes},
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Criterion not found")
+    return _serialise(updated)
+
+
+@router.delete("/{tender_id}/criteria/{criterion_id}", response_model=schemas.TenderOut)
+def delete_criterion(
+    tender_id: str,
+    criterion_id: str,
+    tenders: Collection = Depends(get_tender_records),
+):
+    return _remove_nested(tenders, tender_id, "criteria", criterion_id)
+
+
+@router.get(
+    "/{tender_id}/criteria/{criterion_id}/candidates",
+    response_model=schemas.CandidateResults,
+)
+def criterion_candidates(
+    tender_id: str,
+    criterion_id: str,
+    tenders: Collection = Depends(get_tender_records),
+    projects: Collection = Depends(get_project_records),
+    employees: Collection = Depends(get_employee_records),
+    documents: Collection = Depends(get_documents),
+):
+    """The projects, employees or documents that meet one criterion, by the
+    rules in app/matching.py. Read-only: nothing is written, and nothing
+    about the result is stored."""
+    record = tenders.find_one({"_id": _object_id(tender_id)})
+    if record is None:
+        raise HTTPException(status_code=404, detail="Tender not found")
+    tender = _serialise(record)
+    criterion = next((c for c in tender["criteria"] if c.get("id") == criterion_id), None)
+    if criterion is None:
+        raise HTTPException(status_code=404, detail="Criterion not found")
+    return matching.candidates_for(
+        criterion,
+        tender,
+        projects=projects,
+        employees=employees,
+        documents=documents,
+        tenders=tenders,
+    )
+
+
+# --------------------------------------------------------------------------
 # Attached documents — same contract as a project's: attach validates the
 # document exists, detach deliberately does not, because deleting an attached
 # document detaches it as a second step, by which point it is already gone.
 # --------------------------------------------------------------------------
+
+
+def _document_oids(document_ids: List[str]) -> List[ObjectId]:
+    """The ids that are parseable, as ObjectIds.
+
+    An unparseable entry is skipped rather than raising: it can only be junk
+    left by something outside this API, and one bad string must not make a
+    tender unreadable.
+    """
+    oids = []
+    for document_id in document_ids or []:
+        try:
+            oids.append(ObjectId(document_id))
+        except (InvalidId, TypeError):
+            continue
+    return oids
+
+
+@router.get("/{tender_id}/documents", response_model=List[schemas.DocumentMongoOut])
+def list_tender_documents(
+    tender_id: str,
+    tenders: Collection = Depends(get_tender_records),
+    documents: Collection = Depends(get_documents),
+):
+    """The documents attached to one tender, newest first.
+
+    This is what the Documents tab reads. It used to fetch the whole document
+    log and filter it in the browser, which meant every tender screen paid
+    for every CV, project evidence file and unattached entry in the system.
+
+    Both representations are accepted, as a project's own endpoint accepts
+    both of its: a document counts as this tender's if it carries the
+    tender_id *or* if the tender lists it. Attaching is deliberately open to
+    more than one tender while tender_id can only name one, so the list alone
+    is the only thing that knows about the second tender's attachment -- and
+    a document the migration left unassigned, one two tenders both list, is
+    known by nothing else at all. Reading only tender_id would drop both from
+    a tab that shows them today.
+
+    Ordering matches the document log's own: newest first, with _id breaking
+    ties. The tab groups by type on top of that, so documents of the same
+    type keep their newest-first order inside their group.
+    """
+    record = tenders.find_one({"_id": _object_id(tender_id)}, {"document_ids": 1})
+    if not record:
+        raise HTTPException(status_code=404, detail="Tender not found")
+
+    query = {
+        "$or": [
+            {"tender_id": tender_id},
+            {"_id": {"$in": _document_oids(record.get("document_ids") or [])}},
+        ]
+    }
+    cursor = documents.find(query).sort([("created_at", DESCENDING), ("_id", DESCENDING)])
+    return [serialise_document(doc) for doc in cursor]
+
+
+# --------------------------------------------------------------------------
+# Cited projects
+#
+# The past work a bid puts forward as its experience. A tender points at
+# projects and does not own them: a project is evidence in its own right,
+# outlives the bid, and may be cited by any number of bids at once -- so
+# nothing here writes to the project, and a citation is not a claim.
+#
+# It is emphatically NOT the project a won tender produced. Citing carries no
+# outcome, no assignment and no status, and it does not reach the project's
+# documents: a tender's own Documents tab and the projects it cites are two
+# separate lists, and `projects.document_ids` and `documents.project_id` are
+# neither read nor written here.
+# --------------------------------------------------------------------------
+
+# Ids are stored as strings on both sides; this is the same parse the
+# document list needs, under the name that reads correctly here.
+_project_oids = _document_oids
+
+
+@router.get("/{tender_id}/projects", response_model=List[schemas.ProjectOut])
+def list_tender_projects(
+    tender_id: str,
+    tenders: Collection = Depends(get_tender_records),
+    projects: Collection = Depends(get_project_records),
+    documents: Collection = Depends(get_documents),
+):
+    """The projects this tender cites, most recently updated first.
+
+    Resolved here rather than in the browser, the way a tender's documents
+    are: the evidence tab receives the projects it needs instead of the whole
+    project list to filter down.
+
+    Each row is an ordinary project, carrying the `document_types` the
+    projects list already resolves, so the evidence strip reads the same on
+    this tab as it does on the Projects screen. Reading those types touches
+    the document log but writes nothing to it -- citing a project does not
+    give the tender its documents.
+
+    A citation of a project that has since been deleted simply matches
+    nothing; deleting a project clears the citation, so this is only ever the
+    projects that are really there.
+    """
+    record = tenders.find_one({"_id": _object_id(tender_id)}, {"cited_project_ids": 1})
+    if not record:
+        raise HTTPException(status_code=404, detail="Tender not found")
+
+    oids = _project_oids(record.get("cited_project_ids") or [])
+    cursor = projects.find({"_id": {"$in": oids}}).sort(
+        [("updated_at", DESCENDING), ("_id", DESCENDING)]
+    )
+    records = list(cursor)
+    types = types_by_project(documents, records)
+    return [
+        serialise_project(project, types.get(str(project["_id"]))) for project in records
+    ]
+
+
+@router.post("/{tender_id}/projects/{project_id}", response_model=schemas.TenderOut)
+def cite_project(
+    tender_id: str,
+    project_id: str,
+    tenders: Collection = Depends(get_tender_records),
+    projects: Collection = Depends(get_project_records),
+):
+    """Cite an existing project as evidence for this tender.
+
+    Idempotent: $addToSet rather than $push, so citing the same project twice
+    is a no-op instead of a duplicate entry.
+
+    Unlike attaching a document, this is not exclusive and never could be.
+    The whole point of past evidence is that the same completed project is
+    put forward for bid after bid, so a project already cited elsewhere is
+    cited here as well, and neither citation is disturbed.
+
+    The project is checked before anything is written, so citing one that is
+    not there changes nothing.
+    """
+    oid = _object_id(tender_id)
+    try:
+        project_oid = ObjectId(project_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not projects.find_one({"_id": project_oid}, {"_id": 1}):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    updated = tenders.find_one_and_update(
+        {"_id": oid},
+        {
+            "$addToSet": {"cited_project_ids": project_id},
+            "$set": {"updated_at": _now_utc_ms()},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Tender not found")
+    return _serialise(updated)
+
+
+@router.delete("/{tender_id}/projects/{project_id}", response_model=schemas.TenderOut)
+def uncite_project(
+    tender_id: str,
+    project_id: str,
+    tenders: Collection = Depends(get_tender_records),
+):
+    """Stop citing a project. The project itself is untouched.
+
+    The project is deliberately not looked up first, on the same reasoning as
+    detaching a document: deleting a project clears the citation as a second
+    step, and a citation left pointing at a project that is gone is exactly
+    what this call exists to clear.
+    """
+    updated = tenders.find_one_and_update(
+        {"_id": _object_id(tender_id)},
+        {
+            "$pull": {"cited_project_ids": project_id},
+            "$set": {"updated_at": _now_utc_ms()},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Tender not found")
+    return _serialise(updated)
 
 
 @router.post("/{tender_id}/documents/{document_id}", response_model=schemas.TenderOut)
@@ -465,6 +815,35 @@ def link_document(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Tender not found")
+
+    # The other half of the link. Written only where the document is free or
+    # already this tender's: attaching is deliberately still open to more
+    # than one tender (unlike a project's, which refuses), and a second
+    # tender taking the pointer off the first would make it say something
+    # untrue about a tender that is still showing the document. First claim
+    # keeps it; the later tender still lists the document in its own
+    # document_ids, which is what the screens read.
+    #
+    # Nor is it written on a document a project or an employee holds. Linking
+    # an existing project evidence document or a person's certificate to a
+    # bid puts it forward; it does not make it the tender's. The tender lists
+    # it through document_ids, and the document keeps its one owner -- the
+    # rule migration 0004 applied to the data already there.
+    documents.update_one(
+        {
+            "_id": document_oid,
+            "$and": [
+                {"$or": [
+                    {"tender_id": None},
+                    {"tender_id": {"$exists": False}},
+                    {"tender_id": tender_id},
+                ]},
+                {"$or": [{"project_id": None}, {"project_id": {"$exists": False}}]},
+                {"$or": [{"employee_id": None}, {"employee_id": {"$exists": False}}]},
+            ],
+        },
+        {"$set": {"tender_id": tender_id}},
+    )
     return _serialise(updated)
 
 
@@ -473,7 +852,19 @@ def unlink_document(
     tender_id: str,
     document_id: str,
     tenders: Collection = Depends(get_tender_records),
+    documents: Collection = Depends(get_documents),
 ):
+    """Detach a document from this tender. The document itself is kept.
+
+    The document is deliberately not looked up first, for the reason given
+    above: deleting an attached document detaches it as a second step, by
+    which point it is already gone, and a link left pointing at a deleted
+    document is exactly what this call exists to clear.
+
+    tender_id is cleared only where it names *this* tender. A document
+    another tender claimed is not this call's to unclaim, and one that is
+    already gone simply matches nothing.
+    """
     updated = tenders.find_one_and_update(
         {"_id": _object_id(tender_id)},
         {"$pull": {"document_ids": document_id}, "$set": {"updated_at": _now_utc_ms()}},
@@ -481,4 +872,14 @@ def unlink_document(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Tender not found")
+
+    try:
+        document_oid = ObjectId(document_id)
+    except (InvalidId, TypeError):
+        document_oid = None
+    if document_oid is not None:
+        documents.update_one(
+            {"_id": document_oid, "tender_id": tender_id},
+            {"$set": {"tender_id": None}},
+        )
     return _serialise(updated)

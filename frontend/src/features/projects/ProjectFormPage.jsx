@@ -73,19 +73,35 @@ export default function ProjectFormPage() {
       const saved = isEditing
         ? await updateProject(projectId, form)
         : await createProject(form);
-      navigate(paths.project(saved.id), { replace: true });
+      // Confirmed on the record screen, since that is where this lands.
+      navigate(paths.project(saved.id), {
+        replace: true,
+        state: {
+          notice: isEditing ? "Project saved." : "Project created.",
+        },
+      });
     } catch (err) {
       setError(err.message || "Could not save this project.");
       setSubmitting(false);
     }
   }
 
+  // Read by handleDelete below as well as by the dialog, so it is declared
+  // before both rather than between them.
+  const documentCount = existing.data?.document_ids?.length ?? 0;
+
   async function handleDelete() {
     setDeleting(true);
     setDeleteError(null);
     try {
       await deleteProject(projectId);
-      navigate(paths.projects(), { replace: true });
+      // The record is gone, so the confirmation belongs on the list.
+      navigate(paths.projects(), {
+        replace: true,
+        state: {
+          notice: `Project deleted. Its ${documentCount === 1 ? "document stays" : "documents stay"} in the document log.`,
+        },
+      });
     } catch (err) {
       setDeleteError(err.message || "Could not delete this project.");
       setDeleting(false);
@@ -103,7 +119,6 @@ export default function ProjectFormPage() {
     );
   }
 
-  const documentCount = existing.data?.document_ids?.length ?? 0;
 
   return (
     <>

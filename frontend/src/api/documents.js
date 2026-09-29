@@ -1,7 +1,7 @@
 // The base URL and the error-envelope reader moved to http.js when Projects
 // gained its own client and needed both. Re-exported here so the modules and
 // screens already importing API_BASE_URL from this file keep working.
-import { API_BASE_URL, errorMessage } from "./http";
+import { API_BASE_URL, errorMessage, queryString, requestJson } from "./http";
 
 export { API_BASE_URL };
 
@@ -27,25 +27,83 @@ export async function updateDocument(id, formData) {
   return res.json();
 }
 
+export async function getDocument(id) {
+  const res = await fetch(`${API_BASE_URL}/documents/${id}`);
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load entry"));
+  }
+  return res.json();
+}
+
+/**
+ * Every descriptive field a document carries. PUT writes all of them on each
+ * call -- one it is not sent is stored as empty -- so a partial edit has to
+ * send the rest back unchanged.
+ */
+const DOCUMENT_FIELDS = [
+  "document_type",
+  "category",
+  "client_name",
+  "reference_number",
+  "project_title",
+  "contract_value",
+  "document_date",
+  "department",
+  "submitted_by",
+  "notes",
+];
+
+/**
+ * Change only the named fields of a document, and optionally its file.
+ *
+ * A document is shared: the same row is what the Documents screen edits and
+ * what a project, tender or employee record points at. An edit made from one
+ * of those owners must not quietly rewrite what the others wrote, so this
+ * reads the stored document first and sends every field it was not asked to
+ * change back exactly as it found it. `changes` keys left undefined are
+ * treated as not changing.
+ */
+export async function updateDocumentFields(id, changes, file = null) {
+  const stored = await getDocument(id);
+  const data = new FormData();
+  for (const key of DOCUMENT_FIELDS) {
+    const value = changes[key] !== undefined ? changes[key] : stored[key];
+    data.append(key, value ?? "");
+  }
+  // Omitting the file is what tells the backend to keep the existing one.
+  if (file) data.append("document_file", file);
+  return updateDocument(id, data);
+}
+
 export async function deleteDocument(id) {
   const res = await fetch(`${API_BASE_URL}/documents/${id}`, { method: "DELETE" });
   if (!res.ok) {
-    throw new Error(await errorMessage(res, "Failed to delete entry"));
+    const error = new Error(await errorMessage(res, "Failed to delete entry"));
+    // Kept so a caller can tell "already gone" from a real failure.
+    error.status = res.status;
+    throw error;
   }
 }
 
+/**
+ * One page of the document log: `{ items, total, page, page_size }`, the same
+ * shape every other list returns. Filters left empty are not sent.
+ */
 export async function listDocuments(filters = {}) {
-  const params = new URLSearchParams();
-  if (filters.document_type) params.append("document_type", filters.document_type);
-  if (filters.category) params.append("category", filters.category);
-  if (filters.q) params.append("q", filters.q);
+  const query = queryString({
+    q: filters.q,
+    document_type: filters.document_type,
+    category: filters.category,
+    sort: filters.sort,
+    page: filters.page,
+    page_size: filters.pageSize,
+  });
+  return requestJson(`/documents/${query}`, { fallback: "Failed to load entries" });
+}
 
-  const query = params.toString();
-  const res = await fetch(`${API_BASE_URL}/documents/${query ? `?${query}` : ""}`);
-  if (!res.ok) {
-    throw new Error("Failed to load entries");
-  }
-  return res.json();
+/** Every document type in use across the log, for filters and forms. */
+export async function listDocumentTypes() {
+  return requestJson("/documents/types", { fallback: "Failed to load document types" });
 }
 
 /**

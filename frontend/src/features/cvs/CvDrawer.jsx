@@ -9,6 +9,7 @@ import { addCv, updateCv, deleteCv, EMPTY_CV } from "../../api/employees";
 import {
   CV_DOCUMENT_TYPE,
   createAttachment,
+  changedDetails,
   deleteAttachment,
   updateAttachment,
 } from "../../api/attachments";
@@ -34,22 +35,44 @@ export default function CvDrawer({ employee, cv, onClose, onSaved }) {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
   const fileInputRef = useRef(null);
+  // The form as it opened, to tell what an edit actually changed.
+  const openedWith = useRef(form);
+  // Saving and deleting are each two requests, and the second can fail on
+  // its own. These remember that the first already succeeded, so a retry
+  // finishes the job rather than starting it again -- as the attached
+  // document drawer does.
+  const createdIdRef = useRef(null);
+  const deletedRef = useRef(false);
 
   function handleChange(e) {
     const { name, value } = e.target;
     setForm((prev) => ({ ...prev, [name]: value }));
   }
 
+  // The details this drawer's own form decides. Everything else on the
+  // document is written once, when it is created, and never again from here.
+  function attachmentEdits(values) {
+    return {
+      title: values.version_label || "CV",
+      date: values.cv_date,
+      uploadedBy: values.uploaded_by,
+    };
+  }
+
   function attachmentDetails() {
     return {
       documentType: CV_DOCUMENT_TYPE,
       subjectName: employee.full_name,
-      title: form.version_label || "CV",
       reference: employee.employee_code,
-      date: form.cv_date,
-      uploadedBy: form.uploaded_by,
+      ...attachmentEdits(form),
       file,
     };
+  }
+
+  // Only what changed since the drawer opened, so an edit never rewrites
+  // document fields the person did not touch here.
+  function editedDetails() {
+    return { ...changedDetails(attachmentEdits(openedWith.current), attachmentEdits(form)), file };
   }
 
   async function handleSubmit(e) {
@@ -66,12 +89,19 @@ export default function CvDrawer({ employee, cv, onClose, onSaved }) {
       // The file goes to the documents endpoint first; only once it is stored
       // does the local record get a pointer to it.
       let attachment = { document_id: cv?.document_id ?? null, file_name: cv?.file_name ?? null };
-      if (!isEditing) {
+      if (createdIdRef.current) {
+        // Uploaded on an earlier attempt; only saving the record failed.
+        // Uploading again would orphan that first copy in the document log --
+        // or be refused as a duplicate file -- so the retry reuses it.
+        attachment = await updateAttachment(createdIdRef.current, attachmentDetails());
+      } else if (!isEditing) {
         attachment = await createAttachment(attachmentDetails());
+        createdIdRef.current = attachment.document_id;
       } else if (cv.document_id) {
-        attachment = await updateAttachment(cv.document_id, attachmentDetails());
+        attachment = (await updateAttachment(cv.document_id, editedDetails())) ?? attachment;
       } else if (file) {
         attachment = await createAttachment(attachmentDetails());
+        createdIdRef.current = attachment.document_id;
       }
 
       const values = { ...form, ...attachment };
@@ -88,7 +118,12 @@ export default function CvDrawer({ employee, cv, onClose, onSaved }) {
     setDeleting(true);
     setDeleteError(null);
     try {
-      if (cv.document_id) await deleteAttachment(cv.document_id);
+      // Once the file is gone a retry must not delete it again: it would 404
+      // and never reach the record itself.
+      if (cv.document_id && !deletedRef.current) {
+        await deleteAttachment(cv.document_id);
+        deletedRef.current = true;
+      }
       await deleteCv(employee.id, cv.id);
       onSaved();
     } catch (err) {

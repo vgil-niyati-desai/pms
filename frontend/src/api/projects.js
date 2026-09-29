@@ -46,21 +46,32 @@ function editableFields(values) {
   return payload;
 }
 
-/** The document types a project holds, resolved through the caller's lookup. */
-export function documentTypesFor(project, documentTypeById) {
-  const types = (project.document_ids || []).map((id) => documentTypeById[id]).filter(Boolean);
-  return [...new Set(types)];
+/**
+ * The documents belonging to one project, newest first.
+ *
+ * The Documents tab used to call listDocuments() and filter the whole log
+ * against the project's document_ids in the browser, so opening any project
+ * downloaded every CV, tender receipt and unattached entry in the system.
+ * The server answers this directly now.
+ *
+ * The evidence types a project holds arrive on the project itself, as
+ * `document_types` -- also resolved server-side -- which is what the list
+ * screen draws its pills from.
+ */
+export async function listProjectDocuments(projectId) {
+  return requestJson(`/projects/${projectId}/documents`, {
+    fallback: "Failed to load this project's documents",
+  });
 }
 
 /**
  * One page of projects: `{ items, total, page, page_size }`.
  *
+ * Each item carries `document_types`: the distinct document types that project
+ * holds, resolved by the server. That is what the evidence pills read.
+ *
  * @param filters.has  document types the project must have, e.g. ["LOI"].
- *        The server joins projects to the document log itself to answer this,
- *        so unlike the browser store it needs no type lookup passed in — a
- *        `documentTypeById` from an existing caller is accepted and ignored.
- *        The list screen still uses that lookup for the evidence pills it
- *        draws per row, which is its own concern.
+ *        The server joins projects to the document log itself to answer this.
  */
 export async function listProjects(filters = {}) {
   const {

@@ -1,12 +1,12 @@
 import { sumAmounts, dash, formatAmount, formatTimestamp } from "../../lib/format";
+import { criteriaCountLabel } from "./criteriaFields";
 
 /**
- * The tender's own fields, led by a readiness summary.
- *
- * Qualification criteria and attached evidence belong in this summary too, but
- * they arrive in Phase 4 — what is counted here is only what exists.
+ * The tender's own fields, led by a readiness summary: what the tender asks
+ * for, then what has been gathered for it. What is counted here is only what
+ * exists -- whether the criteria are met is not worked out yet.
  */
-export default function TenderOverviewTab({ tender, documentCount }) {
+export default function TenderOverviewTab({ tender, documentCount, citedProjectCount }) {
   const recordedCost = sumAmounts(tender.cost_items.map((item) => item.amount));
 
   const fields = [
@@ -14,8 +14,8 @@ export default function TenderOverviewTab({ tender, documentCount }) {
     ["Reference number", dash(tender.reference_number)],
     ["Tender type", dash(tender.tender_type)],
     ["Estimated value", formatAmount(tender.estimated_value)],
-    ["EMD amount", formatAmount(tender.emd_amount)],
-    ["Tender fee", formatAmount(tender.tender_fee)],
+    ["EMD required", formatAmount(tender.emd_amount)],
+    ["Tender fee required", formatAmount(tender.tender_fee)],
     ["Published", dash(tender.published_date)],
     ["Submission deadline", dash(tender.submission_deadline)],
     ["Submission mode", dash(tender.submission_mode)],
@@ -24,10 +24,14 @@ export default function TenderOverviewTab({ tender, documentCount }) {
   ];
 
   const summary = [
+    ["Criteria", criteriaCountLabel(tender.criteria)],
     ["Cost recorded", formatAmount(recordedCost)],
     ["Cost items", tender.cost_items.length],
     ["Certificates", tender.certificates.length],
     ["Documents", documentCount],
+    // The past work this bid puts forward. A count of citations, not of
+    // anything the tender owns.
+    ["Cited projects", citedProjectCount],
   ];
 
   return (

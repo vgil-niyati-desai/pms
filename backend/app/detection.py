@@ -295,7 +295,15 @@ _NUMBER = r"\d{1,3}(?:\s?,\s?\d{2,3})+(?:\.\d+)?|\d+(?:\.\d+)?"
 # arrive next to a currency marker, which the currency rule already catches.
 _SCALE = r"(?:lakhs?|lacs?|crores?|millions?|billions?|thousands?)"
 
-_CURRENCY = "(?:₹|\\$|€|£|Rs\\.?|INR|USD|EUR|GBP|AED|SAR)"
+# The lettered codes must stand as a word of their own. Matched case-blind
+# and unguarded, "Rs" is the tail of "years", "hours" and "members", so
+# "years 2019" came back as a sure currency amount -- and "SAR" / "USD" hit
+# the front of longer words the same way. Only letters are ruled out on
+# either side: "Rs.50,000", "(INR 45 lakh)" and "500Rs" all still read as
+# money. The symbols need no guard; nothing ordinary ends in "₹".
+_CURRENCY = (
+    "(?:₹|\\$|€|£|(?<![A-Za-z])(?:Rs\\.?|INR|USD|EUR|GBP|AED|SAR)(?![A-Za-z]))"
+)
 
 # A trailing "/-" or "only", the way an amount is written out on an Indian
 # invoice, is part of the figure and belongs inside the box.
@@ -1019,11 +1027,10 @@ def _area_for(page, rect, page_index: int, pymupdf) -> Optional[Area]:
     Worth knowing, because it is easy to mistake for a bug here: PyMuPDF's
     *drawing* side (`draw_rect`, `add_redact_annot`) takes rectangles in the
     unrotated page and applies /Rotate itself, so on a rotated page it wants
-    different numbers than `get_pixmap` produced. That mismatch sits in
-    `redaction._redact_pdf` and predates this module -- it lands a *manual*
-    box on a rotated page in the wrong place too, identically. Matching the
-    rendered image here is what keeps automatic and manual boxes the same
-    thing; it is not this module's place to paper over the other half.
+    different numbers than `get_pixmap` produced. `redaction._redact_pdf`
+    turns every box back with `derotation_matrix` before redacting, the
+    inverse of the step below, so automatic and manual boxes stay the same
+    thing and both land where they were drawn.
     """
     box = (rect * page.rotation_matrix).normalize()
     box = pymupdf.Rect(box.x0 - PAD_X, box.y0 - PAD_Y, box.x1 + PAD_X, box.y1 + PAD_Y)

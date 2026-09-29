@@ -20,7 +20,7 @@
  * When employees get their own endpoint, this module is what gets replaced.
  */
 
-import { createDocument, deleteDocument, updateDocument } from "./documents";
+import { createDocument, deleteDocument, updateDocumentFields } from "./documents";
 
 export const CV_DOCUMENT_TYPE = "Resume CV";
 export const CERTIFICATION_DOCUMENT_TYPE = "Certification";
@@ -43,7 +43,9 @@ function buildFormData({ documentType, subjectName, title, reference, date, uplo
   data.append("project_title", title || "");
   data.append("reference_number", reference || "");
   data.append("document_date", date || "");
-  data.append("submitted_by", uploadedBy);
+  // Empty when the drawer does not know who uploaded it -- never the literal
+  // "undefined" FormData would otherwise write.
+  data.append("submitted_by", uploadedBy || "");
   data.append("notes", "");
   if (file) data.append("document_file", file);
   return data;
@@ -55,16 +57,59 @@ export async function createAttachment(details) {
   return { document_id: saved.id, file_name: saved.file_name };
 }
 
+/** Which document field each attachment detail is written to. */
+const FIELD_FOR_DETAIL = {
+  title: "project_title",
+  reference: "reference_number",
+  date: "document_date",
+  uploadedBy: "submitted_by",
+};
+
 /**
- * Updates an existing attachment. Omitting `file` keeps the stored file and
- * refreshes only the descriptive fields, which is what an edit that does not
- * touch the upload should do.
+ * The details that differ between two sets, for an edit to send.
+ *
+ * An edit only writes what the person actually changed in the drawer. Values
+ * computed from the same unchanged inputs compare equal and are left out, so
+ * opening a CV and saving it untouched rewrites nothing on its document.
+ */
+export function changedDetails(before, after) {
+  const changed = {};
+  for (const key of Object.keys(FIELD_FOR_DETAIL)) {
+    if (after[key] !== undefined && after[key] !== before[key]) changed[key] = after[key];
+  }
+  return changed;
+}
+
+/**
+ * Updates an existing attachment: its file if `file` is given, and only the
+ * descriptive details present in `details`.
+ *
+ * Everything else on the document -- its type, category, who it is for, and
+ * any notes, value or department written from the Documents screen -- is
+ * left exactly as stored. Those are shared with every other place the
+ * document appears, and an edit made here has no business rewriting them.
+ * Returns null when there is nothing to write, so the caller keeps the
+ * pointer it already has.
  */
 export async function updateAttachment(documentId, details) {
-  const saved = await updateDocument(documentId, buildFormData(details));
+  const changes = {};
+  for (const [key, field] of Object.entries(FIELD_FOR_DETAIL)) {
+    if (details[key] !== undefined) changes[field] = details[key] || "";
+  }
+  if (!details.file && Object.keys(changes).length === 0) return null;
+  const saved = await updateDocumentFields(documentId, changes, details.file);
   return { document_id: saved.id, file_name: saved.file_name };
 }
 
+/**
+ * Deletes an attachment's document. One that is already gone counts as
+ * deleted: a retry after the first attempt succeeded on the server but its
+ * response was lost must go on to remove the record, not stop at a 404.
+ */
 export async function deleteAttachment(documentId) {
-  await deleteDocument(documentId);
+  try {
+    await deleteDocument(documentId);
+  } catch (err) {
+    if (err.status !== 404) throw err;
+  }
 }
