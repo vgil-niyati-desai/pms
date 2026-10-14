@@ -1,3 +1,5 @@
+import logging
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,7 +11,71 @@ from .routers import documents_mongo, employees_mongo, projects_mongo, tenders_m
 
 load_dotenv()
 
+# uvicorn's own error logger, so a traceback lands in the same console, in the
+# same format, as everything else the server reports.
+logger = logging.getLogger("uvicorn.error")
+
+UNEXPECTED_ERROR_MESSAGE = (
+    "Something went wrong on the server. Please try again; if it keeps "
+    "happening, the server log has the details."
+)
+
+
+class UnexpectedErrorMiddleware:
+    """Answer an unhandled exception with the API's usual JSON error, and log it.
+
+    Without this, a bug in an endpoint reached Starlette's outermost error
+    handler, which replies with plain-text "Internal Server Error" from
+    *outside* the CORS middleware. With no CORS headers the browser may not
+    read that reply at all, so the screen showed "Failed to fetch" -- a
+    network problem -- for what was really a server bug.
+
+    Mounted inside CORSMiddleware so the reply carries its headers, and in the
+    same {"detail": "..."} shape every HTTPException already uses, so the
+    frontend's errorMessage() reads it with no change. The exception is logged
+    with its full traceback, never swallowed: the person sees a plain
+    sentence, the server log keeps everything needed to fix it.
+
+    A plain ASGI class rather than @app.middleware("http"), which would wrap
+    every file download in a streaming adapter for no gain.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        response_started = False
+
+        async def tracking_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracking_send)
+        except Exception:
+            logger.exception(
+                "Unhandled error while serving %s %s", scope.get("method"), scope.get("path")
+            )
+            if response_started:
+                # Part of a response is already on the wire; a second one
+                # cannot be sent, so let the server close the connection.
+                raise
+            response = JSONResponse(status_code=500, content={"detail": UNEXPECTED_ERROR_MESSAGE})
+            await response(scope, receive, send)
+
+
 app = FastAPI(title="Project Document Collection System")
+
+# Added before CORSMiddleware on purpose: Starlette wraps later middleware
+# around earlier, so this one sits inside CORS and its replies get the
+# Access-Control headers the browser needs to read them.
+app.add_middleware(UnexpectedErrorMiddleware)
 
 # Allow the local React dev server to call this API. Vite prefers 5173 but
 # falls back to the next free port when it is taken (a second `npm run dev`,

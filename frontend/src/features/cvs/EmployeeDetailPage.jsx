@@ -1,7 +1,9 @@
 import { useCallback } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import DetailHeader from "../../components/DetailHeader";
+import DetailSkeleton from "../../components/DetailSkeleton";
 import Tabs from "../../components/Tabs";
+import useHandoffNotice from "../../hooks/useHandoffNotice";
 import useQueryParams from "../../hooks/useQueryParams";
 import useResource from "../../hooks/useResource";
 import { getEmployee } from "../../api/employees";
@@ -20,13 +22,19 @@ const TABS = [
 ];
 
 // The open drawer rides in the query string alongside the tab, so both are
-// linkable and Back closes the drawer.
+// linkable and survive a refresh. Note that useQueryParams replaces rather
+// than pushes, so Back leaves the employee rather than closing the drawer --
+// Escape, the backdrop and Close do that, and NavigationGuard asks first when
+// the drawer holds unsaved changes.
 const VIEW_SCHEMA = { tab: "profile", cv: "", cert: "" };
 
 export default function EmployeeDetailPage() {
   const { employeeId } = useParams();
   const navigate = useNavigate();
   const { values, setValues } = useQueryParams(VIEW_SCHEMA);
+  // Handed over by the employee form after a save -- that happens on a screen
+  // the user then leaves, so this is the only screen left to confirm it on.
+  const [notice, setNotice] = useHandoffNotice();
 
   const loadEmployee = useCallback(() => getEmployee(employeeId), [employeeId]);
   const employee = useResource(loadEmployee);
@@ -52,7 +60,16 @@ export default function EmployeeDetailPage() {
   // Only while there is nothing to show yet. Every CV and certification save
   // reloads the employee, and without the data check that reload replaced
   // the whole page with "Loading..." each time.
-  if (employee.loading && !employee.data) return <p className="muted">Loading...</p>;
+  if (employee.loading && !employee.data) {
+    return (
+      <>
+        <p className="muted page-note">
+          <Link to={paths.cvs()}>&larr; CVs</Link>
+        </p>
+        <DetailSkeleton facts={6} tabs={TABS.length} />
+      </>
+    );
+  }
   // A reload that fails once the record is on screen reports inline below
   // the header instead, as the project page does.
   if (employee.error && !employee.data) {
@@ -72,6 +89,7 @@ export default function EmployeeDetailPage() {
 
       <DetailHeader
         title={record.full_name}
+        subtitleLabel="Designation"
         subtitle={record.designation}
         facts={[
           { label: "Employee code", value: dash(record.employee_code) },
@@ -94,14 +112,14 @@ export default function EmployeeDetailPage() {
               className="btn"
               onClick={() => navigate(paths.editEmployee(record.id))}
             >
-              Edit
+              Edit employee
             </button>
             <button
               type="button"
               className="btn"
               onClick={() => setValues({ tab: "certifications", cv: "", cert: "new" })}
             >
-              + Certification
+              + Add certification
             </button>
             <button
               type="button"
@@ -113,6 +131,20 @@ export default function EmployeeDetailPage() {
           </>
         }
       />
+
+      {notice && (
+        <div className="alert alert-success notice-bar" role="status">
+          <span>{notice}</span>
+          <button
+            type="button"
+            className="notice-dismiss"
+            onClick={() => setNotice(null)}
+            aria-label="Dismiss this message"
+          >
+            &times;
+          </button>
+        </div>
+      )}
 
       {employee.error && (
         <div className="alert alert-error">

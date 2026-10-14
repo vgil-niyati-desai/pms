@@ -7,15 +7,18 @@ import FilterMenu from "../../components/FilterMenu";
 import FilterChips from "../../components/FilterChips";
 import SearchInput from "../../components/SearchInput";
 import Field from "../../components/Field";
+import FormRow from "../../components/FormRow";
 import CheckboxGroup from "../../components/CheckboxGroup";
 import TagInput from "../../components/TagInput";
 import TagChip from "../../components/TagChip";
+import StatusPill from "../../components/StatusPill";
 import Pagination from "../../components/Pagination";
 import useHandoffNotice from "../../hooks/useHandoffNotice";
 import useQueryParams from "../../hooks/useQueryParams";
 import useResource from "../../hooks/useResource";
+import usePageRecovery, { wholePage } from "../../hooks/usePageRecovery";
 import { listProjects, listClients, listTags, PROJECT_STATUSES } from "../../api/projects";
-import { EVIDENCE_TYPES, dash, formatPeriod, formatTimestamp } from "./projectFields";
+import { EVIDENCE_TYPES, formatAmount, formatPeriod, formatTimestamp } from "./projectFields";
 import EvidenceStrip from "./EvidenceStrip";
 import { paths } from "../../app/routes";
 
@@ -29,6 +32,10 @@ const FILTER_SCHEMA = {
   tagMode: "any",
   status: "",
   has: [],
+  endDateFrom: "",
+  endDateTo: "",
+  minValue: "",
+  maxValue: "",
   sort: "-updated_at",
   page: 1,
 };
@@ -43,11 +50,20 @@ export default function ProjectsListPage() {
   // Each project arrives carrying the document types it holds, resolved by
   // the server for the projects on this page. The screen used to download
   // the entire document log and work that out for itself.
+  const page = wholePage(values.page);
   const loadProjects = useCallback(
-    () => listProjects({ ...values, pageSize: PAGE_SIZE }),
-    [values],
+    () => listProjects({ ...values, page, pageSize: PAGE_SIZE }),
+    [values, page],
   );
   const projects = useResource(loadProjects, { initialData: { items: [], total: 0 } });
+  // The page the URL names, as one that exists; see usePageRecovery.
+  const movingPage = usePageRecovery({
+    rawPage: values.page,
+    page,
+    resource: projects,
+    pageSize: PAGE_SIZE,
+    setPage: (page) => setValues({ page }),
+  });
 
   const loadClients = useCallback(() => listClients(), []);
   const clients = useResource(loadClients, { initialData: [] });
@@ -102,6 +118,18 @@ export default function ProjectsListPage() {
       label: `Has ${type}`,
       onRemove: () => setFilter({ has: values.has.filter((t) => t !== type) }),
     })),
+    (values.endDateFrom || values.endDateTo) && {
+      key: "endDate",
+      // Named as the end date rather than "completed": the bound is on the
+      // date recorded, which on an ongoing project is when it is due to end.
+      label: `End date: ${values.endDateFrom || "any"} to ${values.endDateTo || "any"}`,
+      onRemove: () => setFilter({ endDateFrom: "", endDateTo: "" }),
+    },
+    (values.minValue !== "" || values.maxValue !== "") && {
+      key: "value",
+      label: `Value: ${values.minValue || "0"} to ${values.maxValue || "any"}`,
+      onRemove: () => setFilter({ minValue: "", maxValue: "" }),
+    },
   ].filter(Boolean);
 
   const columns = [
@@ -112,9 +140,17 @@ export default function ProjectsListPage() {
     },
     { key: "client_name", header: sortHeader("client_name", "Client") },
     {
+      key: "status",
+      header: sortHeader("status", "Status"),
+      className: "cell-tight",
+      render: (project) => <StatusPill value={project.status} />,
+    },
+    {
       key: "contract_value",
       header: sortHeader("contract_value", "Value"),
-      render: (project) => dash(project.contract_value),
+      // Read as money, the way a tender's value already is. Sorting is the
+      // server's and is unaffected: it parses the stored text itself.
+      render: (project) => formatAmount(project.contract_value),
     },
     {
       key: "period",
@@ -124,9 +160,23 @@ export default function ProjectsListPage() {
     {
       key: "documents",
       header: "Documents",
-      render: (project) => (
-        <EvidenceStrip compact heldTypes={project.document_types || []} />
-      ),
+      // The ratio leads the pills so whether a project is ready to cite in a
+      // tender reads at a glance, without counting checkmarks across a row.
+      // Intersected with EVIDENCE_TYPES because document_types can carry any
+      // type a linked document happens to have, not only the five evidence
+      // types this count is about.
+      render: (project) => {
+        const heldTypes = project.document_types || [];
+        const heldEvidence = EVIDENCE_TYPES.filter((type) => heldTypes.includes(type));
+        return (
+          <>
+            <div className="muted evidence-count" style={{ marginBottom: 4 }}>
+              {heldEvidence.length}/{EVIDENCE_TYPES.length} evidence
+            </div>
+            <EvidenceStrip compact heldTypes={heldTypes} />
+          </>
+        );
+      },
     },
     {
       key: "tags",
@@ -212,6 +262,68 @@ export default function ProjectsListPage() {
           </select>
         </Field>
 
+        {/* The two bounds a tender's experience clauses are written in --
+            "each worth at least X", "completed in the last N years" -- so the
+            projects that can answer one can be found without reading the
+            list. Folded behind a trigger like the tender list's own ranges:
+            a from/to pair is too wide for a line of the toolbar. */}
+        <FilterMenu
+          label="End date"
+          count={values.endDateFrom || values.endDateTo ? 1 : 0}
+        >
+          <FormRow>
+            <Field label="End date from" htmlFor="filter-end-from">
+              <input
+                id="filter-end-from"
+                type="date"
+                value={values.endDateFrom}
+                onChange={(e) => setFilter({ endDateFrom: e.target.value })}
+              />
+            </Field>
+            <Field label="to" htmlFor="filter-end-to">
+              <input
+                id="filter-end-to"
+                type="date"
+                value={values.endDateTo}
+                onChange={(e) => setFilter({ endDateTo: e.target.value })}
+              />
+            </Field>
+          </FormRow>
+          <p className="muted hint">
+            A project with no end date recorded is not in range either way.
+          </p>
+        </FilterMenu>
+
+        <FilterMenu
+          label="Value"
+          count={values.minValue !== "" || values.maxValue !== "" ? 1 : 0}
+        >
+          <FormRow>
+            <Field label="Value from" htmlFor="filter-min-value">
+              <input
+                id="filter-min-value"
+                type="number"
+                min="0"
+                value={values.minValue}
+                onChange={(e) => setFilter({ minValue: e.target.value })}
+              />
+            </Field>
+            <Field label="to" htmlFor="filter-max-value">
+              <input
+                id="filter-max-value"
+                type="number"
+                min="0"
+                value={values.maxValue}
+                onChange={(e) => setFilter({ maxValue: e.target.value })}
+              />
+            </Field>
+          </FormRow>
+          <p className="muted hint">
+            Contract values are typed as text, so one that cannot be read as a
+            number — and one not recorded at all — is not in range either way.
+          </p>
+        </FilterMenu>
+
         <FilterMenu label="Has document" count={values.has.length}>
           <CheckboxGroup
             legend="Has document"
@@ -246,17 +358,17 @@ export default function ProjectsListPage() {
 
       <section className="card list-panel">
         <div className="list-head">
-          <h2>Projects {!projects.loading && `(${total})`}</h2>
+          <h2>Projects {!projects.loading && !projects.error && `(${total})`}</h2>
         </div>
 
         <FilterChips chips={chips} />
 
-        {projects.error && <div className="alert alert-error">{projects.error}</div>}
-
         <DataTable
           columns={columns}
           rows={items}
-          loading={projects.loading}
+          loading={projects.loading || movingPage}
+          error={projects.error}
+          onRetry={projects.reload}
           onRowClick={(project) => navigate(paths.project(project.id))}
           empty={
             filtering ? (
@@ -282,7 +394,7 @@ export default function ProjectsListPage() {
         />
 
         <Pagination
-          page={values.page}
+          page={page}
           pageSize={PAGE_SIZE}
           total={total}
           onPageChange={(page) => setValues({ page })}

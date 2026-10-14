@@ -251,6 +251,85 @@ def run_redaction_suite(client, collection, id_without_file):
                                        "width": 0.2, "height": 0.1}]})
     check("an area on a page that does not exist -> 400", res.status_code == 400, res.text)
 
+    # --- saving the copy into the log -------------------------------------
+    # The copy stops being only a download and becomes its own entry. What is
+    # checked here is that the two are genuinely separate records: the copy is
+    # the redacted one, and the original still has its own file, its own
+    # record and its own text afterwards.
+    import os
+
+    before_files = len(os.listdir(storage.UPLOAD_DIR))
+    original_record = collection.find_one({"_id": ObjectId(entry["id"])})
+
+    res = client.post(f"/documents/{entry['id']}/redacted-copy/save", json={"areas": areas})
+    if check("POST /redacted-copy/save -> 201", res.status_code == 201, res.text):
+        saved = res.json()
+        check("the saved copy is a new entry, not the original",
+              saved["id"] != entry["id"], saved["id"])
+        check("the saved copy points back at the original",
+              saved.get("redacted_from_id") == entry["id"], saved.get("redacted_from_id"))
+        check("the saved copy is named to say what it is",
+              saved.get("file_name") == "cost sheet_redacted.pdf", saved.get("file_name"))
+        check("the saved copy says so in its notes too",
+              (saved.get("notes") or "").startswith("Redacted copy of cost sheet.pdf"),
+              saved.get("notes"))
+        check("the saved copy carries the original's description",
+              saved.get("document_type") == "Cost Sheet"
+              and saved.get("client_name") == "Redaction Check Ltd", res.text)
+        check("the saved copy is attached to no project, employee or tender",
+              saved.get("project_id") is None and saved.get("employee_id") is None
+              and saved.get("tender_id") is None, res.text)
+        check("the log now holds the original and the copy",
+              collection.count_documents({"client_name": "Redaction Check Ltd"}) == 2)
+
+        copy_record = collection.find_one({"_id": ObjectId(saved["id"])})
+        check("the copy has a stored file of its own",
+              copy_record["stored_file_name"] != original_record["stored_file_name"],
+              copy_record["stored_file_name"])
+        check("exactly one new file was written",
+              len(os.listdir(storage.UPLOAD_DIR)) == before_files + 1)
+
+        # Through the ordinary download endpoint: the copy is a logged
+        # document like any other, not a special case with its own route.
+        res = client.get(f"/documents/{saved['id']}/file")
+        if check("the saved copy downloads like any other entry -> 200",
+                 res.status_code == 200, res.status_code):
+            stored_copy = pymupdf.open(stream=res.content, filetype="pdf")
+            text_in_copy = stored_copy[0].get_text()
+            check("the saved copy is redacted", REDACT_SECRET not in text_in_copy,
+                  repr(text_in_copy[:60]))
+            check("the saved copy keeps what was not selected",
+                  REDACT_PUBLIC in text_in_copy, repr(text_in_copy[:60]))
+            stored_copy.close()
+
+        # The same promises as after a download, re-checked after a *write*.
+        # Saving is the one operation in this feature that writes anything, so
+        # it is the one that has to be shown not to have written here.
+        check("saving a copy left the original's bytes alone",
+              hashlib.sha256(open(path, "rb").read()).hexdigest() == before)
+        check("saving a copy left the original's record alone",
+              collection.find_one({"_id": ObjectId(entry["id"])}) == original_record)
+        check("the original is not marked as a copy of anything",
+              original_record.get("redacted_from_id") is None,
+              original_record.get("redacted_from_id"))
+        check("the original still downloads unchanged after a save",
+              client.get(f"/documents/{entry['id']}/file").content == pdf_bytes)
+        original = pymupdf.open(path)
+        check("the original still contains the redacted text after a save",
+              REDACT_SECRET in original[0].get_text())
+        original.close()
+
+        client.delete(f"/documents/{saved['id']}")
+        check("deleting the copy leaves the original in the log",
+              collection.count_documents({"_id": ObjectId(entry["id"])}) == 1)
+
+    check("saving a copy for an entry with no file -> 404",
+          client.post(f"/documents/{id_without_file}/redacted-copy/save",
+                      json={"areas": areas}).status_code == 404)
+    check("saving a copy with no areas -> 422",
+          client.post(f"/documents/{entry['id']}/redacted-copy/save",
+                      json={"areas": []}).status_code == 422)
+
     # --- PNG ---------------------------------------------------------------
     res = client.post(
         "/documents/",
@@ -278,6 +357,28 @@ def run_redaction_suite(client, collection, id_without_file):
                   str(out.pixel(80, 80)))
             check("unselected pixels are untouched", out.pixel(300, 250) == (200, 200, 200),
                   str(out.pixel(300, 250)))
+
+        # An image copy is byte-deterministic, so saving the same selection
+        # twice produces the same file -- which is the duplicate every upload
+        # in this module is checked for. The point of the check is the cleanup:
+        # a refused save must leave nothing behind on disk.
+        png_areas = [{"page": 0, "x": 0.1, "y": 0.1, "width": 0.3, "height": 0.3}]
+        res = client.post(f"/documents/{image_entry['id']}/redacted-copy/save",
+                          json={"areas": png_areas})
+        if check("POST /redacted-copy/save for a PNG -> 201", res.status_code == 201, res.text):
+            png_copy = res.json()
+            check("the PNG copy is named to say what it is",
+                  png_copy.get("file_name") == "site_redacted.png", png_copy.get("file_name"))
+            files_before_retry = len(os.listdir(storage.UPLOAD_DIR))
+            res = client.post(f"/documents/{image_entry['id']}/redacted-copy/save",
+                              json={"areas": png_areas})
+            check("saving an identical copy again -> 409", res.status_code == 409, res.text)
+            check("the refused save left no file behind",
+                  len(os.listdir(storage.UPLOAD_DIR)) == files_before_retry,
+                  len(os.listdir(storage.UPLOAD_DIR)))
+            check("the refused save created no second copy",
+                  collection.count_documents({"redacted_from_id": image_entry["id"]}) == 1)
+            client.delete(f"/documents/{png_copy['id']}")
         client.delete(f"/documents/{image_entry['id']}")
 
     client.delete(f"/documents/{entry['id']}")
@@ -1311,6 +1412,203 @@ def run_photo_suite(client, collection):
         client.delete(f"/documents/{entry['id']}")
 
 
+def run_missing_file_suite(client, collection):
+    """A record whose file is gone from disk.
+
+    The record is the source of truth, and nothing here may change it: every
+    route that reads the file answers 404 "File missing on server", writes
+    nothing, and leaves the record exactly as it was. The way back is an edit
+    that replaces the file, so that is checked too. Everything this creates is
+    deleted again before it returns.
+    """
+    import copy
+
+    from bson import ObjectId
+
+    from app import storage
+    from app.routers import documents_mongo
+
+    fields = {"document_type": "Site Photo Log", "category": "Roads",
+              "client_name": "Missing File Check Ltd", "submitted_by": "vansh"}
+    res = client.post("/documents/", data=fields,
+                      files={"document_file": ("lost.pdf", io.BytesIO(_pdf(b"LOST")),
+                                               "application/pdf")})
+    if not check("missing-file suite: an entry with a file -> 201", res.status_code == 201, res.text):
+        return
+    entry = res.json()
+    oid = ObjectId(entry["id"])
+    stored = collection.find_one({"_id": oid})["stored_file_name"]
+    path = storage.upload_path(stored)
+    check("its file is on disk and downloads",
+          os.path.exists(path) and client.get(f"/documents/{entry['id']}/file").status_code == 200)
+
+    before = copy.deepcopy(collection.find_one({"_id": oid}))
+    os.remove(path)
+    # Taken after the removal, so the only files this must equal later are
+    # the ones that were still there once the original was gone.
+    files_before = sorted(os.listdir(storage.UPLOAD_DIR))
+
+    def gone(label, res):
+        check(f"{label} with the file gone -> 404 'File missing on server'",
+              res.status_code == 404 and res.json().get("detail") == "File missing on server",
+              f"{res.status_code} {res.text[:120]}")
+
+    areas = [{"page": 0, "x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2}]
+    gone("GET /file", client.get(f"/documents/{entry['id']}/file"))
+    gone("GET /file?disposition=inline",
+         client.get(f"/documents/{entry['id']}/file?disposition=inline"))
+    gone("GET /redaction/source", client.get(f"/documents/{entry['id']}/redaction/source"))
+    gone("GET /redaction/pages/0", client.get(f"/documents/{entry['id']}/redaction/pages/0"))
+    gone("GET /redaction/suggestions",
+         client.get(f"/documents/{entry['id']}/redaction/suggestions"))
+    gone("POST /redacted-copy",
+         client.post(f"/documents/{entry['id']}/redacted-copy", json={"areas": areas}))
+    gone("POST /redacted-copy/save",
+         client.post(f"/documents/{entry['id']}/redacted-copy/save", json={"areas": areas}))
+
+    check("the refused save logged no copy",
+          collection.count_documents({"redacted_from_id": entry["id"]}) == 0)
+    check("no route wrote a file while the original was missing",
+          sorted(os.listdir(storage.UPLOAD_DIR)) == files_before)
+    check("the record is unchanged by every failed file access",
+          collection.find_one({"_id": oid}) == before, str(collection.find_one({"_id": oid})))
+    check("the entry itself still reads -> 200",
+          client.get(f"/documents/{entry['id']}").status_code == 200)
+    check("and is still listed under its file name",
+          any(r["id"] == entry["id"] and r["file_name"] == "lost.pdf"
+              for r in client.get("/documents/?page_size=200").json()["items"]))
+
+    # The startup backfill skips an entry whose file cannot be read, leaving
+    # its hash null rather than failing or inventing one.
+    collection.update_one({"_id": oid}, {"$set": {"file_hash": None}})
+    check("backfill_file_hashes skips an entry whose file is missing",
+          documents_mongo.backfill_file_hashes(collection) == 0
+          and collection.find_one({"_id": oid})["file_hash"] is None)
+    collection.update_one({"_id": oid}, {"$set": {"file_hash": before["file_hash"]}})
+
+    res = client.put(f"/documents/{entry['id']}",
+                     data={**fields, "notes": "edited while the file was missing"})
+    check("a metadata-only edit still succeeds -> 200", res.status_code == 200, res.text)
+    after = collection.find_one({"_id": oid})
+    check("and leaves the file pointer and hash as they were",
+          after["stored_file_name"] == stored and after["file_hash"] == before["file_hash"])
+
+    res = client.put(f"/documents/{entry['id']}", data=fields,
+                     files={"document_file": ("found.pdf", io.BytesIO(_pdf(b"FOUND")),
+                                              "application/pdf")})
+    if check("replacing the missing file -> 200", res.status_code == 200, res.text):
+        check("the replacement downloads",
+              client.get(f"/documents/{entry['id']}/file").content == _pdf(b"FOUND"))
+        check("the record now names the replacement",
+              res.json()["file_name"] == "found.pdf"
+              and collection.find_one({"_id": oid})["stored_file_name"] != stored)
+
+    os.remove(storage.upload_path(collection.find_one({"_id": oid})["stored_file_name"]))
+    check("DELETE of an entry whose file is missing -> 204",
+          client.delete(f"/documents/{entry['id']}").status_code == 204)
+    check("and the entry is gone", collection.count_documents({"_id": oid}) == 0)
+
+
+def run_file_name_propagation_suite(client, collection):
+    """Replacing a document's file renames the copies of its name that CVs,
+    certifications, cost items and submitted certificates hold.
+
+    Those records carry file_name themselves and are never resolved through
+    the document, so a replace made from the Documents log used to leave the
+    employee and tender screens showing the old name. The records are written
+    straight into the collections here: what is under test is the documents
+    endpoint, not the employee and tender ones.
+    """
+    from datetime import datetime, timezone
+
+    employees = collection.database["employees"]
+    tenders = collection.database["tenders"]
+
+    fields = {"document_type": "Resume CV", "category": "Personnel",
+              "client_name": "Asha Patil", "submitted_by": "vansh"}
+    res = client.post("/documents/", data=fields,
+                      files={"document_file": ("asha_cv.pdf", io.BytesIO(_pdf(b"CV1")),
+                                               "application/pdf")})
+    if not check("propagation suite: an entry with a file -> 201", res.status_code == 201, res.text):
+        return
+    doc_id = res.json()["id"]
+    other = client.post("/documents/", data={**fields, "client_name": "Someone Else"},
+                        files={"document_file": ("other.pdf", io.BytesIO(_pdf(b"OTHER")),
+                                                 "application/pdf")}).json()
+
+    stale = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    employee_id = employees.insert_one({
+        "full_name": "Asha Patil",
+        "cvs": [
+            {"id": "cv-a", "version_label": "v1", "document_id": doc_id, "file_name": "asha_cv.pdf"},
+            {"id": "cv-b", "version_label": "v1 again", "document_id": doc_id, "file_name": "asha_cv.pdf"},
+            {"id": "cv-c", "version_label": "other", "document_id": other["id"], "file_name": "other.pdf"},
+        ],
+        "certifications": [
+            {"id": "cert-a", "name": "PMP", "document_id": doc_id, "file_name": "asha_cv.pdf"},
+        ],
+        "updated_at": stale,
+    }).inserted_id
+    tender_id = tenders.insert_one({
+        "title": "ERP rollout",
+        "document_ids": [doc_id],
+        "cost_items": [
+            {"id": "cost-a", "cost_type": "EMD", "document_id": doc_id, "file_name": "asha_cv.pdf"},
+            {"id": "cost-b", "cost_type": "Fee", "document_id": other["id"], "file_name": "other.pdf"},
+        ],
+        "certificates": [
+            {"id": "tc-a", "name": "ISO 9001", "document_id": doc_id, "file_name": "asha_cv.pdf"},
+        ],
+        "updated_at": stale,
+    }).inserted_id
+
+    def names(record, field):
+        return [item["file_name"] for item in record[field]]
+
+    res = client.put(f"/documents/{doc_id}", data={**fields, "notes": "edited"})
+    emp, ten = employees.find_one({"_id": employee_id}), tenders.find_one({"_id": tender_id})
+    check("a metadata-only edit leaves every copied name alone",
+          res.status_code == 200
+          and names(emp, "cvs") == ["asha_cv.pdf", "asha_cv.pdf", "other.pdf"]
+          and names(emp, "certifications") == ["asha_cv.pdf"]
+          and names(ten, "cost_items") == ["asha_cv.pdf", "other.pdf"]
+          and names(ten, "certificates") == ["asha_cv.pdf"]
+          and emp["updated_at"] == stale and ten["updated_at"] == stale,
+          str((names(emp, "cvs"), names(ten, "cost_items"))))
+
+    # A different type on purpose: the preview picks PDF-or-image from the
+    # copied name, so a stale copy is a broken picture, not just a wrong label.
+    res = client.put(f"/documents/{doc_id}", data=fields,
+                     files={"document_file": ("asha_cv_2026.png",
+                                              io.BytesIO(b"\x89PNG propagation check"), "image/png")})
+    if check("replacing the file through the document log -> 200", res.status_code == 200, res.text):
+        emp, ten = employees.find_one({"_id": employee_id}), tenders.find_one({"_id": tender_id})
+        check("every CV pointing at the document carries the new name, the other CV does not",
+              names(emp, "cvs") == ["asha_cv_2026.png", "asha_cv_2026.png", "other.pdf"],
+              str(names(emp, "cvs")))
+        check("the certification's copy is renamed",
+              names(emp, "certifications") == ["asha_cv_2026.png"], str(names(emp, "certifications")))
+        check("the cost item's copy is renamed, the one for another document is not",
+              names(ten, "cost_items") == ["asha_cv_2026.png", "other.pdf"], str(names(ten, "cost_items")))
+        check("the submitted certificate's copy is renamed",
+              names(ten, "certificates") == ["asha_cv_2026.png"], str(names(ten, "certificates")))
+        check("the pointers themselves are untouched",
+              [i["document_id"] for i in emp["cvs"]] == [doc_id, doc_id, other["id"]]
+              and emp["certifications"][0]["document_id"] == doc_id
+              and [i["document_id"] for i in ten["cost_items"]] == [doc_id, other["id"]]
+              and ten["certificates"][0]["document_id"] == doc_id)
+        check("the employee and the tender record the change",
+              emp["updated_at"] > stale and ten["updated_at"] > stale)
+        check("the tender's own document list is untouched", ten["document_ids"] == [doc_id])
+        check("the document itself carries the new name",
+              client.get(f"/documents/{doc_id}").json()["file_name"] == "asha_cv_2026.png")
+
+    employees.delete_one({"_id": employee_id})
+    tenders.delete_one({"_id": tender_id})
+    client.delete(f"/documents/{doc_id}")
+    client.delete(f"/documents/{other['id']}")
+
+
 def run_suite(collection):
     """Drive every documents endpoint against `collection`."""
     from fastapi.testclient import TestClient
@@ -1324,6 +1622,13 @@ def run_suite(collection):
     # the tenders collection is pointed at this suite's own database too.
     main.app.dependency_overrides[mongodb.get_tender_records] = (
         lambda: collection.database["tenders"]
+    )
+    # Likewise the employees collection: DELETE clears the pointers a CV or a
+    # certification holds, and PUT with a new file renames their copies of
+    # file_name. Without this override those writes would reach the database
+    # in .env.
+    main.app.dependency_overrides[mongodb.get_employee_records] = (
+        lambda: collection.database["employees"]
     )
     mongodb.get_collection = lambda: collection
     mongodb.ping = lambda: (True, None)
@@ -1450,6 +1755,12 @@ def run_suite(collection):
         # --- a photograph embedded in a PDF ---------------------------------
         run_photo_suite(client, collection)
 
+        # --- a record whose file is gone from disk --------------------------
+        run_missing_file_suite(client, collection)
+
+        # --- a replaced file renames the copies employees and tenders hold --
+        run_file_name_propagation_suite(client, collection)
+
         # --- read --------------------------------------------------------
         res = client.get(f"/documents/{plain['id']}")
         check("GET /documents/{id} -> 200", res.status_code == 200, res.text)
@@ -1496,6 +1807,25 @@ def run_suite(collection):
               str(first))
         check("page 2 of size 1 holds the other entry",
               ids("/documents/?page_size=1&page=2") == [plain["id"]])
+
+        # Page numbers are whole numbers from 1 to MAX_PAGE; anything else is a
+        # 422 naming `page`, never a 500 (10**20 used to overflow the skip). A
+        # page past the end is an ordinary empty page that still reports the
+        # total, which is what lets the screens move back to the last page.
+        for path in ('/documents/',):
+            for bad in ("0", "-1", "2.5", "abc", "100001", "100000000000000000000"):
+                res = client.get(path, params={"page": bad})
+                check(f"{path}?page={bad} is refused with a 422 naming page",
+                      res.status_code == 422 and res.json()["detail"][0]["loc"] == ["query", "page"],
+                      f"{res.status_code} {res.text[:150]}")
+            total = client.get(path).json()["total"]
+            far = client.get(path, params={"page": 100000}).json()
+            check(f"{path}?page=100000, the furthest allowed, is empty but keeps the total",
+                  far["items"] == [] and far["total"] == total and far["page"] == 100000,
+                  str(far)[:200])
+            none = client.get(path, params={"q": "zz-matches-nothing", "page": 3}).json()
+            check(f"{path} with nothing matching reports a total of 0 on any page",
+                  none["items"] == [] and none["total"] == 0, str(none)[:200])
         past_end = client.get("/documents/?page_size=1&page=3").json()
         check("a page past the end is empty but still reports the total",
               past_end["items"] == [] and past_end["total"] == 2, str(past_end))
@@ -1668,7 +1998,15 @@ def main_live():
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     offline = "--offline" in sys.argv
-    code = main_offline() if offline else main_live()
+    from verify_offline import scratch_uploads
+
+    # Every file a suite writes lands in a throwaway folder, never in the
+    # app's own uploads folder -- in live mode as much as offline.
+    uploads = scratch_uploads()
+    try:
+        code = main_offline() if offline else main_live()
+    finally:
+        uploads.cleanup()
 
     if RESULTS:
         passed = sum(1 for _, ok, _ in RESULTS if ok)

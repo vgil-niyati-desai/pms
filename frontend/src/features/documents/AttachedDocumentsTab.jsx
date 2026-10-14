@@ -1,6 +1,7 @@
 import { useState } from "react";
 import DataTable from "../../components/DataTable";
 import EmptyState from "../../components/EmptyState";
+import { TableSkeleton } from "../../components/Skeleton";
 import Field from "../../components/Field";
 import FileViewLink from "../../components/FileViewLink";
 import StatusPill from "../../components/StatusPill";
@@ -144,7 +145,9 @@ export default function AttachedDocumentsTab({
       )}
 
       {initialLoading ? (
-        <p className="muted">Loading...</p>
+        // One group's worth: how many there will be is exactly what is not
+        // known yet.
+        <TableSkeleton columns={columns} rows={3} />
       ) : groups.length === 0 ? (
         <EmptyState
           message={typeFilter ? "No documents of that type on this record." : emptyMessage}

@@ -1,6 +1,7 @@
 import DataTable from "../../components/DataTable";
 import EmptyState from "../../components/EmptyState";
 import StatusPill from "../../components/StatusPill";
+import { TableSkeleton } from "../../components/Skeleton";
 import EvidenceStrip from "../projects/EvidenceStrip";
 import { dash, formatPeriod } from "../../lib/format";
 
@@ -86,7 +87,7 @@ export default function TenderEvidenceTab({
       {error && <div className="alert alert-error">{error}</div>}
 
       {initialLoading ? (
-        <p className="muted">Loading...</p>
+        <TableSkeleton columns={columns} rows={3} />
       ) : projects.length === 0 ? (
         <EmptyState
           message="No projects cited as evidence yet."

@@ -13,4 +13,8 @@ export const DOCUMENT_TYPES = EVIDENCE_TYPES;
 
 // Re-exported so the Projects screens keep importing their helpers from one
 // place, while the formatting itself is shared with the other areas.
-export { dash, formatPeriod, formatTimestamp } from "../../lib/format";
+//
+// formatAmount is the same one the tender screens read their money with, so a
+// contract value and an estimated value are written the same way wherever
+// either is shown.
+export { dash, formatAmount, formatPeriod, formatTimestamp } from "../../lib/format";

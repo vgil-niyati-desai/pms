@@ -467,7 +467,7 @@ def _check_candidates(client):
     senior = employee("Asha Senior", "Senior Project Manager", [{"name": "PMP"}])
     expired = employee("Ravi Expired", "project manager", [{"name": "pmp", "expiry_date": "2020-01-01"}])
     lead = employee("Tara Lead", "Team Leader", [{"name": "PMP"}])
-    employee("Nobody Unassigned")
+    employee("Nobody Unassigned", "Accounts Assistant")
     analytics = employee("Dev Analytics", "Data & Analytics Lead")
 
     # Documents for the certification criterion: one the company's, one a person's.
@@ -651,7 +651,7 @@ def _check_existing_document_links(client, documents):
                       files={"document_file": ("completion.pdf", io.BytesIO(pdf), "application/pdf")})
     project_doc = res.json()
     created["documents"].append(project_doc["id"])
-    person = client.post("/employees/", json={"full_name": "Link check person"}).json()
+    person = client.post("/employees/", json={"full_name": "Link check person", "designation": "Auditor"}).json()
     created["employees"].append(person["id"])
     person_doc = client.post("/documents/", data={"document_type": "Certification", "category": "Personnel",
                                                   "client_name": "C", "submitted_by": "verify"}).json()
@@ -816,8 +816,8 @@ def run_suite(tenders, documents, offline=False):
             check("a negative amount is still rejected",
                   client.post(f"/tenders/{scratch['id']}/cost-items",
                               json={"amount": "-1"}).status_code == 422)
-            check("a certificate without a name is accepted",
-                  client.post(f"/tenders/{scratch['id']}/certificates", json={}).status_code == 201)
+            check("a certificate without a name -> 422 (the drawer requires one)",
+                  client.post(f"/tenders/{scratch['id']}/certificates", json={}).status_code == 422)
             client.delete(f"/tenders/{scratch['id']}")
 
         # --- more records to filter and sort ----------------------------
@@ -936,6 +936,25 @@ def run_suite(tenders, documents, offline=False):
               set(titles(one)).isdisjoint(titles(two)) and len(titles(two)) == 2,
               f"{titles(one)} then {titles(two)}")
 
+        # Page numbers are whole numbers from 1 to MAX_PAGE; anything else is a
+        # 422 naming `page`, never a 500 (10**20 used to overflow the skip). A
+        # page past the end is an ordinary empty page that still reports the
+        # total, which is what lets the screens move back to the last page.
+        for path in ('/tenders/',):
+            for bad in ("0", "-1", "2.5", "abc", "100001", "100000000000000000000"):
+                res = client.get(path, params={"page": bad})
+                check(f"{path}?page={bad} is refused with a 422 naming page",
+                      res.status_code == 422 and res.json()["detail"][0]["loc"] == ["query", "page"],
+                      f"{res.status_code} {res.text[:150]}")
+            total = client.get(path).json()["total"]
+            far = client.get(path, params={"page": 100000}).json()
+            check(f"{path}?page=100000, the furthest allowed, is empty but keeps the total",
+                  far["items"] == [] and far["total"] == total and far["page"] == 100000,
+                  str(far)[:200])
+            none = client.get(path, params={"q": "zz-matches-nothing", "page": 3}).json()
+            check(f"{path} with nothing matching reports a total of 0 on any page",
+                  none["items"] == [] and none["total"] == 0, str(none)[:200])
+
         # --- vocabularies ------------------------------------------------
         check("GET /tenders/authorities lists distinct authorities, sorted",
               client.get("/tenders/authorities").json()
@@ -1008,6 +1027,22 @@ def run_suite(tenders, documents, offline=False):
         check("and it does not show on the tender's documents endpoint",
               [d["id"] for d in client.get(f"/tenders/{erp_id}/documents").json()]
               == [])
+
+        # The receipt's scan replaced from the Documents log must rename the
+        # copy the cost item holds: the Costs tab reads that copy, and picks
+        # PDF-or-image from it, so a stale name is a broken picture.
+        import io
+        res = client.put(f"/documents/{receipt['id']}", data={
+            "document_type": "Payment Receipt", "category": "Tendering",
+            "client_name": "MSAMB", "submitted_by": "vansh",
+        }, files={"document_file": ("emd-receipt-2026.png",
+                                    io.BytesIO(b"\x89PNG emd receipt scan"), "image/png")})
+        check("replacing the receipt's file through the document log -> 200",
+              res.status_code == 200, res.text)
+        renamed = client.get(f"/tenders/{erp_id}").json()["cost_items"][0]
+        check("the cost item now shows the replacement's name",
+              renamed["file_name"] == "emd-receipt-2026.png"
+              and renamed["document_id"] == receipt["id"], str(renamed))
 
         client.delete(f"/documents/{receipt['id']}")
         after = client.get(f"/tenders/{erp_id}").json()["cost_items"][0]
@@ -1437,7 +1472,15 @@ def main_live():
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     offline = "--offline" in sys.argv
-    code = main_offline() if offline else main_live()
+    from verify_offline import scratch_uploads
+
+    # Every file a suite writes lands in a throwaway folder, never in the
+    # app's own uploads folder -- in live mode as much as offline.
+    uploads = scratch_uploads()
+    try:
+        code = main_offline() if offline else main_live()
+    finally:
+        uploads.cleanup()
 
     if RESULTS:
         passed = sum(1 for _, ok, _ in RESULTS if ok)

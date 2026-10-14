@@ -1,18 +1,29 @@
 import { useCallback, useState } from "react";
-import Drawer from "../../components/Drawer";
+import Drawer, { DrawerCancelButton } from "../../components/Drawer";
 import Field from "../../components/Field";
+import useFieldErrors from "../../hooks/useFieldErrors";
 import FormRow from "../../components/FormRow";
 import TagInput from "../../components/TagInput";
 import ConfirmDelete from "../../components/ConfirmDelete";
 import useResource from "../../hooks/useResource";
-import { addCriterion, updateCriterion, deleteCriterion } from "../../api/tenders";
+import useUnsavedChanges from "../../hooks/useUnsavedChanges";
+import {
+  COMPLIANCE_STATUSES,
+  addCriterion,
+  deleteCriterion,
+  setCriterionCompliance,
+  updateCriterion,
+} from "../../api/tenders";
 import { listCertificationNames, listDesignations } from "../../api/employees";
 import { listDocumentTypes } from "../../api/documents";
 import { formatAmount } from "../../lib/format";
 import { documentTypeOptions } from "../documents/documentTypes";
 import {
+  COMPLIANCE_LABELS,
+  COMPLIANCE_NEEDS_NOTE,
   CRITERION_KINDS,
   KIND_ORDER,
+  complianceStatus,
   criterionSummary,
   kindLabel,
   paramsForm,
@@ -27,6 +38,14 @@ function frameFrom(criterion) {
     clause_ref: criterion?.clause_ref ?? "",
     source_text: criterion?.source_text ?? "",
     notes: criterion?.notes ?? "",
+  };
+}
+
+function complianceFrom(criterion) {
+  return {
+    status: complianceStatus(criterion),
+    note: criterion?.compliance?.note ?? "",
+    decided_by: criterion?.compliance?.decided_by ?? "",
   };
 }
 
@@ -45,11 +64,23 @@ export default function CriterionDrawer({ tender, criterion, onClose, onSaved })
   const [kind, setKind] = useState(criterion?.kind ?? "");
   const [params, setParams] = useState(() => (criterion ? paramsForm(criterion.kind, criterion.params) : {}));
   const [frame, setFrame] = useState(() => frameFrom(criterion));
+  // Only offered on a criterion that exists: there is nothing to have checked
+  // until the requirement has been recorded, and a new one starts unchecked.
+  const [compliance, setCompliance] = useState(() => complianceFrom(criterion));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const fieldErrors = useFieldErrors();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
+
+  // What closing this drawer would lose, in one fixed key order. Kept
+  // separate from requirementChanged/complianceChanged below: those decide
+  // which call to send against the *stored* record, and treat a new criterion
+  // as always changed so the POST is made. This asks a different question --
+  // is there anything on screen that was not here when it opened -- so a
+  // blank Add drawer is not dirty and does not ask on the way out.
+  const { dirty } = useUnsavedChanges({ kind, params, frame, compliance });
 
   // Suggestions only: every one of these fields accepts whatever is typed.
   const loadDesignations = useCallback(() => listDesignations(), []);
@@ -63,14 +94,38 @@ export default function CriterionDrawer({ tender, criterion, onClose, onSaved })
     setKind(next);
     setParams(next ? paramsForm(next) : {});
     setError(null);
+    // A different kind is a different set of fields; none of the old
+    // messages apply to it.
+    fieldErrors.reset();
   }
 
   function setParam(name, value) {
     setParams((prev) => ({ ...prev, [name]: value }));
+    fieldErrors.clear(`criterion_${name}`);
   }
 
   function setFrameField(name, value) {
     setFrame((prev) => ({ ...prev, [name]: value }));
+  }
+
+  function setComplianceField(name, value) {
+    setCompliance((prev) => ({ ...prev, [name]: value }));
+    fieldErrors.clear("criterion_compliance_note");
+  }
+
+  // Compared as form state rather than as payloads, so the two sides are the
+  // same shape and an unchanged criterion is recognised exactly. Both objects
+  // are built key-for-key by the helpers above, so their order is stable.
+  function requirementChanged() {
+    if (!isEditing) return true;
+    return (
+      JSON.stringify(frame) !== JSON.stringify(frameFrom(criterion)) ||
+      JSON.stringify(params) !== JSON.stringify(paramsForm(criterion.kind, criterion.params))
+    );
+  }
+
+  function complianceChanged() {
+    return isEditing && JSON.stringify(compliance) !== JSON.stringify(complianceFrom(criterion));
   }
 
   async function handleSubmit(e) {
@@ -78,14 +133,21 @@ export default function CriterionDrawer({ tender, criterion, onClose, onSaved })
     setError(null);
 
     if (!kind) {
-      setError("Please choose the type of requirement.");
+      fieldErrors.report({ criterion_kind: "Please choose the type of requirement." });
       return;
     }
-    const problem = validateParams(kind, params);
-    if (problem) {
-      setError(problem);
-      return;
+    const problems = {};
+    for (const [name, problem] of Object.entries(validateParams(kind, params))) {
+      problems[`criterion_${name}`] = problem;
     }
+    // Checked here as well as on the server, so the reason is asked for
+    // before anything is sent rather than after the requirement has saved.
+    if (COMPLIANCE_NEEDS_NOTE.includes(compliance.status) && !compliance.note.trim()) {
+      problems.criterion_compliance_note = `Please say why this criterion is recorded as "${
+        COMPLIANCE_LABELS[compliance.status]
+      }".`;
+    }
+    if (fieldErrors.report(problems)) return;
 
     const payload = {
       kind,
@@ -98,8 +160,20 @@ export default function CriterionDrawer({ tender, criterion, onClose, onSaved })
 
     setSubmitting(true);
     try {
-      if (isEditing) await updateCriterion(tender.id, criterion.id, payload);
-      else await addCriterion(tender.id, payload);
+      // Two records, two calls, and each only when it changed. The
+      // requirement comes from the tender notice; whether we meet it is our
+      // own judgement, and marking one must not rewrite the other.
+      if (requirementChanged()) {
+        if (isEditing) await updateCriterion(tender.id, criterion.id, payload);
+        else await addCriterion(tender.id, payload);
+      }
+      if (complianceChanged()) {
+        await setCriterionCompliance(tender.id, criterion.id, {
+          status: compliance.status,
+          note: compliance.note.trim() || null,
+          decided_by: compliance.decided_by.trim() || null,
+        });
+      }
       onSaved();
     } catch (err) {
       setError(err.message || "Could not save this criterion.");
@@ -143,7 +217,9 @@ export default function CriterionDrawer({ tender, criterion, onClose, onSaved })
       return (
         <TagInput
           key={field.name}
+          id={id}
           label={field.label}
+          error={fieldErrors.errors[id]}
           value={value}
           onChange={(next) => setParam(field.name, next)}
           suggestions={field.suggest === "certifications" ? certificationNames.data : []}
@@ -196,7 +272,14 @@ export default function CriterionDrawer({ tender, criterion, onClose, onSaved })
         : field.hint;
 
     return (
-      <Field key={field.name} label={label} htmlFor={id} hint={hint}>
+      <Field
+        key={field.name}
+        label={label}
+        htmlFor={id}
+        hint={hint}
+        required={field.required}
+        error={fieldErrors.errors[id]}
+      >
         {control}
         {field.suggest === "designations" && (
           <datalist id={`${id}_suggestions`}>
@@ -217,8 +300,10 @@ export default function CriterionDrawer({ tender, criterion, onClose, onSaved })
         title={isEditing ? "Edit criterion" : "Add criterion"}
         onClose={onClose}
         dismissable={!submitting && !deleting}
+        dirty={dirty}
       >
         <form onSubmit={handleSubmit}>
+          {fieldErrors.summary && <div className="alert alert-error">{fieldErrors.summary}</div>}
           {error && <div className="alert alert-error">{error}</div>}
 
           <p className="muted hint drawer-context">
@@ -231,7 +316,12 @@ export default function CriterionDrawer({ tender, criterion, onClose, onSaved })
               <p className="prose">{kindLabel(kind)}</p>
             </Field>
           ) : (
-            <Field label="Type *" htmlFor="criterion_kind">
+            <Field
+              label="Type *"
+              htmlFor="criterion_kind"
+              required
+              error={fieldErrors.errors.criterion_kind}
+            >
               <select id="criterion_kind" value={kind} onChange={(e) => chooseKind(e.target.value)}>
                 <option value="">Select the type of requirement</option>
                 {KIND_ORDER.map((key) => (
@@ -290,6 +380,72 @@ export default function CriterionDrawer({ tender, criterion, onClose, onSaved })
                   onChange={(e) => setFrameField("notes", e.target.value)}
                 />
               </Field>
+
+              {/* Only on a criterion that exists. Recorded here, not worked
+                  out: Find candidates shows what is on file against this
+                  requirement, and the call on whether it is met is made by
+                  the person who read it. */}
+              {isEditing && (
+                <>
+                  <h4>Compliance</h4>
+                  <Field
+                    label="Do we meet this requirement?"
+                    htmlFor="criterion_compliance_status"
+                    hint="Your own assessment. Nothing here is decided automatically."
+                  >
+                    <select
+                      id="criterion_compliance_status"
+                      value={compliance.status}
+                      onChange={(e) => setComplianceField("status", e.target.value)}
+                    >
+                      {COMPLIANCE_STATUSES.map((status) => (
+                        <option key={status} value={status}>
+                          {COMPLIANCE_LABELS[status]}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+
+                  {/* Nothing to say about a criterion nobody has looked at,
+                      and a reason left on one would read as a finding. */}
+                  {compliance.status !== "not_checked" && (
+                    <>
+                      <Field
+                        label={
+                          COMPLIANCE_NEEDS_NOTE.includes(compliance.status)
+                            ? "Reason *"
+                            : "Reason"
+                        }
+                        htmlFor="criterion_compliance_note"
+                        hint={
+                          COMPLIANCE_NEEDS_NOTE.includes(compliance.status)
+                            ? "Required: what is missing, or what could not be established. The next person reading this has only what you write here."
+                            : "Optional: what satisfies it, e.g. which project or whose CV."
+                        }
+                        required={COMPLIANCE_NEEDS_NOTE.includes(compliance.status)}
+                        error={fieldErrors.errors.criterion_compliance_note}
+                      >
+                        <textarea
+                          id="criterion_compliance_note"
+                          rows={3}
+                          value={compliance.note}
+                          onChange={(e) => setComplianceField("note", e.target.value)}
+                        />
+                      </Field>
+
+                      <Field label="Assessed by" htmlFor="criterion_compliance_by">
+                        <input
+                          id="criterion_compliance_by"
+                          type="text"
+                          value={compliance.decided_by}
+                          onChange={(e) => setComplianceField("decided_by", e.target.value)}
+                          placeholder="Your name"
+                        />
+                      </Field>
+                    </>
+                  )}
+                </>
+              )}
             </>
           )}
 
@@ -297,9 +453,8 @@ export default function CriterionDrawer({ tender, criterion, onClose, onSaved })
             <button type="submit" className="btn btn-primary" disabled={submitting || deleting}>
               {submitting ? "Saving..." : isEditing ? "Save changes" : "Add criterion"}
             </button>
-            <button type="button" className="btn" onClick={onClose} disabled={submitting || deleting}>
-              Cancel
-            </button>
+            {/* Asks first when something is unsaved, like every other way out. */}
+            <DrawerCancelButton disabled={submitting || deleting} />
             {isEditing && (
               <button
                 type="button"
@@ -315,19 +470,21 @@ export default function CriterionDrawer({ tender, criterion, onClose, onSaved })
       </Drawer>
 
       {confirmingDelete && (
-        <ConfirmDelete
-          title="Delete this criterion?"
-          confirmLabel="Delete criterion"
-          busy={deleting}
-          error={deleteError}
-          onConfirm={handleDelete}
-          onCancel={() => {
-            setConfirmingDelete(false);
-            setDeleteError(null);
-          }}
-        >
-          <p className="muted">{criterionSummary(criterion)}</p>
-        </ConfirmDelete>
+        <div className="drawer-confirm-layer">
+          <ConfirmDelete
+            title="Delete this criterion?"
+            confirmLabel="Delete criterion"
+            busy={deleting}
+            error={deleteError}
+            onConfirm={handleDelete}
+            onCancel={() => {
+              setConfirmingDelete(false);
+              setDeleteError(null);
+            }}
+          >
+            <p className="muted">{criterionSummary(criterion)}</p>
+          </ConfirmDelete>
+        </div>
       )}
     </>
   );

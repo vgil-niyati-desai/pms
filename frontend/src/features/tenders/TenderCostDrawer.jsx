@@ -1,10 +1,14 @@
 import { useRef, useState } from "react";
-import Drawer from "../../components/Drawer";
+import Drawer, { DrawerCancelButton } from "../../components/Drawer";
 import Field from "../../components/Field";
+import useFieldErrors from "../../hooks/useFieldErrors";
 import FormRow from "../../components/FormRow";
-import FileUpload from "../../components/FileUpload";
+import FileUpload, { takePickedFile } from "../../components/FileUpload";
 import DocumentFileSection from "../../components/DocumentFileSection";
 import ConfirmDelete from "../../components/ConfirmDelete";
+import DocumentUsageList from "../../components/DocumentUsageList";
+import useDocumentUsage from "../../hooks/useDocumentUsage";
+import useUnsavedChanges from "../../hooks/useUnsavedChanges";
 import {
   COST_TYPES,
   EMPTY_COST_ITEM,
@@ -47,6 +51,7 @@ export default function TenderCostDrawer({ tender, costItem, onClose, onSaved })
   const [file, setFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const fieldErrors = useFieldErrors();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
@@ -57,12 +62,24 @@ export default function TenderCostDrawer({ tender, costItem, onClose, onSaved })
   // its own. These remember that the first already succeeded, so a retry
   // finishes the job rather than starting it again -- as the attached
   // document drawer does.
+  // What closing this drawer would lose. The picked file is represented by
+  // its name: a File itself serialises to {}, so the snapshot would not see
+  // one being chosen.
+  const { dirty } = useUnsavedChanges({ ...form, _file: file ? file.name : "" });
   const createdIdRef = useRef(null);
   const deletedRef = useRef(false);
+  // A file this record shares -- with a project, a tender or another
+  // record -- is not this record's to delete. Asked when the drawer opens;
+  // a shared file is kept and only this record is removed. The delete
+  // names the same owner, so the server refuses (409) if that changed.
+  const owner = { fromTender: tender.id, fromItem: costItem?.id };
+  const usage = useDocumentUsage(isEditing ? costItem.document_id : null, owner);
+  const keepsFile = usage.otherUses.length > 0;
 
   function handleChange(e) {
-    const { name, value } = e.target;
+    const { id, name, value } = e.target;
     setForm((prev) => ({ ...prev, [name]: value }));
+    fieldErrors.clear(id);
   }
 
   // The details this drawer's own form decides. Everything else on the
@@ -95,14 +112,12 @@ export default function TenderCostDrawer({ tender, costItem, onClose, onSaved })
     e.preventDefault();
     setError(null);
 
-    if (!form.cost_type) {
-      setError("Please choose a cost type.");
-      return;
-    }
+    const problems = {};
+    if (!form.cost_type) problems.cost_type = "Please choose a cost type.";
     if (form.amount === "" || Number(form.amount) < 0) {
-      setError("Please enter an amount of zero or more.");
-      return;
+      problems.cost_amount = "Please enter an amount of zero or more.";
     }
+    if (fieldErrors.report(problems)) return;
 
     setSubmitting(true);
     try {
@@ -141,14 +156,17 @@ export default function TenderCostDrawer({ tender, costItem, onClose, onSaved })
     try {
       // Once the file is gone a retry must not delete it again: it would 404
       // and never reach the record itself.
-      if (costItem.document_id && !deletedRef.current) {
-        await deleteAttachment(costItem.document_id);
+      if (costItem.document_id && !keepsFile && !deletedRef.current) {
+        await deleteAttachment(costItem.document_id, owner);
         deletedRef.current = true;
       }
       await deleteCostItem(tender.id, costItem.id);
       onSaved();
     } catch (err) {
       setDeleteError(err.message || "Could not delete this cost.");
+      // Something else started using the file: ask again, which turns the
+      // dialog into the keep-the-file one with the reason shown.
+      if (err.status === 409) usage.reload();
       setDeleting(false);
     }
   }
@@ -159,8 +177,10 @@ export default function TenderCostDrawer({ tender, costItem, onClose, onSaved })
         title={isEditing ? "Edit cost" : "Add cost"}
         onClose={onClose}
         dismissable={!submitting && !deleting}
+        dirty={dirty}
       >
         <form onSubmit={handleSubmit}>
+          {fieldErrors.summary && <div className="alert alert-error">{fieldErrors.summary}</div>}
           {error && <div className="alert alert-error">{error}</div>}
 
           <p className="muted hint drawer-context">
@@ -168,7 +188,12 @@ export default function TenderCostDrawer({ tender, costItem, onClose, onSaved })
           </p>
 
           <FormRow>
-            <Field label="Cost type *" htmlFor="cost_type">
+            <Field
+              label="Cost type *"
+              htmlFor="cost_type"
+              required
+              error={fieldErrors.errors.cost_type}
+            >
               <select
                 id="cost_type"
                 name="cost_type"
@@ -183,12 +208,19 @@ export default function TenderCostDrawer({ tender, costItem, onClose, onSaved })
                 ))}
               </select>
             </Field>
-            <Field label="Amount *" htmlFor="cost_amount" hint="Numbers only.">
+            <Field
+              label="Amount *"
+              htmlFor="cost_amount"
+              hint="Numbers only."
+              required
+              error={fieldErrors.errors.cost_amount}
+            >
               <input
                 id="cost_amount"
                 name="amount"
                 type="number"
                 min="0"
+                step="any"
                 value={form.amount}
                 onChange={handleChange}
               />
@@ -244,7 +276,10 @@ export default function TenderCostDrawer({ tender, costItem, onClose, onSaved })
                   : "No receipt attached yet."
                 : null
             }
-            onChange={(e) => setFile(e.target.files[0] || null)}
+            error={fieldErrors.errors.cost_file}
+            onChange={(e) =>
+              takePickedFile(e, { fieldId: "cost_file", fieldErrors, setFile })
+            }
             ref={fileInputRef}
           />
 
@@ -252,22 +287,16 @@ export default function TenderCostDrawer({ tender, costItem, onClose, onSaved })
             <button type="submit" className="btn btn-primary" disabled={submitting || deleting}>
               {submitting ? "Saving..." : isEditing ? "Save changes" : "Add cost"}
             </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={onClose}
-              disabled={submitting || deleting}
-            >
-              Cancel
-            </button>
+            {/* Asks first when something is unsaved, like every other way out. */}
+            <DrawerCancelButton disabled={submitting || deleting} />
             {isEditing && (
               <button
                 type="button"
                 className="btn btn-danger form-actions-end"
                 onClick={() => setConfirmingDelete(true)}
-                disabled={submitting || deleting}
+                disabled={submitting || deleting || usage.pending}
               >
-                Delete
+                {usage.pending ? "Checking where it is used..." : "Delete"}
               </button>
             )}
           </div>
@@ -284,27 +313,40 @@ export default function TenderCostDrawer({ tender, costItem, onClose, onSaved })
       </Drawer>
 
       {confirmingDelete && (
-        <ConfirmDelete
-          title="Delete this cost?"
-          confirmLabel="Delete cost"
-          busy={deleting}
-          error={deleteError}
-          onConfirm={handleDelete}
-          onCancel={() => {
-            setConfirmingDelete(false);
-            setDeleteError(null);
-          }}
-        >
-          <p className="muted">
-            {costItem.cost_type} — {formatAmount(costItem.amount)}
-          </p>
-          <p className="muted">
-            {costItem.file_name
-              ? `The record and its receipt (${costItem.file_name}) will be permanently removed.`
-              : "The record will be permanently removed."}{" "}
-            This cannot be undone.
-          </p>
-        </ConfirmDelete>
+        <div className="drawer-confirm-layer">
+          <ConfirmDelete
+            title="Delete this cost?"
+            confirmLabel="Delete cost"
+            busy={deleting}
+            error={deleteError}
+            onConfirm={handleDelete}
+            onCancel={() => {
+              setConfirmingDelete(false);
+              setDeleteError(null);
+            }}
+          >
+            <p className="muted">
+              {costItem.cost_type} — {formatAmount(costItem.amount)}
+            </p>
+            {keepsFile ? (
+              <>
+                <p className="muted">The file is kept, because it is also used by:</p>
+                <DocumentUsageList uses={usage.otherUses} />
+                <p className="muted">
+                  Only this cost record is removed. The file stays available to them. This cannot be
+                  undone.
+                </p>
+              </>
+            ) : (
+              <p className="muted">
+                {costItem.file_name
+                  ? `The record and its receipt (${costItem.file_name}) will be permanently removed.`
+                  : "The record will be permanently removed."}{" "}
+                This cannot be undone.
+              </p>
+            )}
+          </ConfirmDelete>
+        </div>
       )}
     </>
   );

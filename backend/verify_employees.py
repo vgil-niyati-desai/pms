@@ -71,6 +71,12 @@ def run_suite(employees, documents, offline=False):
 
     main.app.dependency_overrides[mongodb.get_employee_records] = lambda: employees
     main.app.dependency_overrides[mongodb.get_documents] = lambda: documents
+    # Replacing a document's file renames the copy a tender's cost item or
+    # certificate holds, so the tenders collection is pointed at this suite's
+    # own database too rather than the one in .env.
+    main.app.dependency_overrides[mongodb.get_tender_records] = (
+        lambda: documents.database["tenders"]
+    )
     mongodb.ping = lambda: (True, None)
 
     try:
@@ -158,22 +164,25 @@ def run_suite(employees, documents, offline=False):
         # Removed again straight away: the counts and sort orders below expect
         # exactly the four records this suite creates on purpose.
         res = client.post("/employees/", json={"full_name": "Future Starter",
+                                               "designation": "Engineer",
                                                "date_of_joining": years_ago(-1)})
         check("a future joining date is allowed and reads as no experience yet",
               res.status_code == 201 and res.json()["vgil_experience_years"] == 0.0,
               res.text)
         if res.status_code == 201:
             client.delete(f"/employees/{res.json()['id']}")
-        res = client.post("/employees/", json={"full_name": "Scratch Row"})
-        ok = check("a name alone is enough; every other field is open-ended",
+        check("POST without a designation -> 422 (the form requires one)",
+              client.post("/employees/", json={"full_name": "Scratch Row"}).status_code == 422)
+        res = client.post("/employees/", json={"full_name": "Scratch Row", "designation": "Clerk"})
+        ok = check("a name and designation are enough; every other field is open-ended",
                    res.status_code == 201, res.text)
         if ok:
             scratch_id = res.json()["id"]
-            check("the blanks come back as blanks", res.json()["designation"] is None)
+            check("the blanks come back as blanks", res.json()["department"] is None)
             check("a CV with no fields at all is accepted",
                   client.post(f"/employees/{scratch_id}/cvs", json={}).status_code == 201)
-            check("a certification without a name is accepted",
-                  client.post(f"/employees/{scratch_id}/certifications", json={}).status_code == 201)
+            check("a certification without a name -> 422 (the drawer requires one)",
+                  client.post(f"/employees/{scratch_id}/certifications", json={}).status_code == 422)
             client.delete(f"/employees/{scratch_id}")
 
         # --- more records to filter and sort ----------------------------
@@ -270,6 +279,32 @@ def run_suite(employees, documents, offline=False):
         check("the range bounds total experience, not time at VGIL",
               "Rahul Deshpande" in names(found), str(names(found)))
 
+        # A bound that is not a usable number of years is a 422 naming the
+        # parameter -- never a 500, and never silently dropped (which would
+        # show the unfiltered list as if it were filtered). 5000 and 1e309
+        # used to overflow the date arithmetic and crash.
+        for param in ("min_experience", "max_experience"):
+            for bad in ("5000", "1e309", "-1e309", "nan", "inf", "-1", "101", "abc"):
+                res = client.get("/employees/", params={param: bad})
+                detail = res.json().get("detail") if res.status_code == 422 else None
+                check(f"{param}={bad} is refused with a 422 naming the parameter",
+                      res.status_code == 422
+                      and detail[0]["loc"] == ["query", param]
+                      and "from 0 to 100" in detail[0]["msg"],
+                      f"{res.status_code} {res.text[:200]}")
+        everyone = sorted(names(client.get("/employees/").json()))
+        for edge, expect in (("100", []), ("0.5", ["Asha Rao", "Rahul Deshpande", "Vikram Iyer"]),
+                             (" 8 ", ["Asha Rao", "Rahul Deshpande"]), ("", everyone)):
+            res = client.get("/employees/", params={"min_experience": edge})
+            check(f"min_experience={edge!r} is accepted and filters as before",
+                  res.status_code == 200 and sorted(names(res.json())) == expect,
+                  f"{res.status_code} {res.text[:200]}")
+        res = client.get("/employees/", params={"max_experience": "100"})
+        check("max_experience=100, the upper boundary, is accepted",
+              res.status_code == 200
+              and sorted(names(res.json())) == ["Asha Rao", "Rahul Deshpande", "Vikram Iyer"],
+              f"{res.status_code} {res.text[:200]}")
+
         # --- sorting ----------------------------------------------------
         order = names(client.get("/employees/", params={"sort": "full_name"}).json())
         check("sort by name is case-insensitive and ascending",
@@ -306,6 +341,25 @@ def run_suite(employees, documents, offline=False):
         check("page 2 continues where page 1 stopped, with no repeats",
               set(names(one)).isdisjoint(names(two)) and len(names(two)) == 2,
               f"{names(one)} then {names(two)}")
+
+        # Page numbers are whole numbers from 1 to MAX_PAGE; anything else is a
+        # 422 naming `page`, never a 500 (10**20 used to overflow the skip). A
+        # page past the end is an ordinary empty page that still reports the
+        # total, which is what lets the screens move back to the last page.
+        for path in ('/employees/', '/employees/certifications'):
+            for bad in ("0", "-1", "2.5", "abc", "100001", "100000000000000000000"):
+                res = client.get(path, params={"page": bad})
+                check(f"{path}?page={bad} is refused with a 422 naming page",
+                      res.status_code == 422 and res.json()["detail"][0]["loc"] == ["query", "page"],
+                      f"{res.status_code} {res.text[:150]}")
+            total = client.get(path).json()["total"]
+            far = client.get(path, params={"page": 100000}).json()
+            check(f"{path}?page=100000, the furthest allowed, is empty but keeps the total",
+                  far["items"] == [] and far["total"] == total and far["page"] == 100000,
+                  str(far)[:200])
+            none = client.get(path, params={"q": "zz-matches-nothing", "page": 3}).json()
+            check(f"{path} with nothing matching reports a total of 0 on any page",
+                  none["items"] == [] and none["total"] == 0, str(none)[:200])
 
         # --- nested CVs -------------------------------------------------
         res = client.post(f"/employees/{asha_id}/cvs", json={
@@ -345,6 +399,39 @@ def run_suite(employees, documents, offline=False):
               res.status_code == 200 and res.json()["cvs"] == [], res.text)
         check("deleting the same CV again -> 404",
               client.delete(f"/employees/{asha_id}/cvs/{cv['id']}").status_code == 404)
+
+        # A CV's file replaced from the Documents log -- not through the CV
+        # drawer, which writes the new name back itself -- must still show
+        # its new name on the employee: the CV carries a copy of file_name,
+        # and nothing reads the document for it.
+        import io
+        uploaded = client.post("/documents/", data={
+            "document_type": "Resume CV", "category": "Personnel",
+            "client_name": "Asha Patil", "submitted_by": "vansh",
+        }, files={"document_file": ("asha_cv.pdf", io.BytesIO(b"%PDF-1.4 asha cv v1"),
+                                    "application/pdf")})
+        if check("a CV file uploaded to the document log -> 201",
+                 uploaded.status_code == 201, uploaded.text):
+            cv_doc = uploaded.json()
+            held = client.post(f"/employees/{asha_id}/cvs", json={
+                "version_label": "2026 general", "purpose": "", "cv_date": "2026-02-01",
+                "uploaded_by": "vansh",
+                "document_id": cv_doc["id"], "file_name": cv_doc["file_name"],
+            }).json()["cvs"][0]
+            check("the CV holds the document's file name", held["file_name"] == "asha_cv.pdf")
+            res = client.put(f"/documents/{cv_doc['id']}", data={
+                "document_type": "Resume CV", "category": "Personnel",
+                "client_name": "Asha Patil", "submitted_by": "vansh",
+            }, files={"document_file": ("asha_cv_2026.pdf", io.BytesIO(b"%PDF-1.4 asha cv v2"),
+                                        "application/pdf")})
+            check("replacing the file through the document log -> 200",
+                  res.status_code == 200, res.text)
+            after = client.get(f"/employees/{asha_id}").json()["cvs"][0]
+            check("the CV on the employee now shows the replacement's name",
+                  after["file_name"] == "asha_cv_2026.pdf" and after["document_id"] == cv_doc["id"],
+                  str(after))
+            client.delete(f"/employees/{asha_id}/cvs/{held['id']}")
+            client.delete(f"/documents/{cv_doc['id']}")
 
         # --- nested certifications --------------------------------------
         certs = [
@@ -408,6 +495,38 @@ def run_suite(employees, documents, offline=False):
                                                params={"today": TODAY}).json()["items"]]
         check("the index defaults to certificate name, ascending",
               order == ["AutoCAD", "First Aid", "First Aid", "PMP"], str(order))
+
+        # `today` must be a real YYYY-MM-DD date. Anything else used to reach
+        # date.fromisoformat unguarded and come back as a 500.
+        for bad in ("abc", "2026-13-45", "2026-02-30", "20260101", "9999-12-31"):
+            res = client.get("/employees/certifications", params={"today": bad})
+            detail = res.json().get("detail") if res.status_code == 422 else None
+            check(f"today={bad} is refused with a 422 naming the parameter",
+                  res.status_code == 422 and detail[0]["loc"] == ["query", "today"],
+                  f"{res.status_code} {res.text[:200]}")
+        for good in ("2028-02-29", f" {TODAY} ", ""):
+            res = client.get("/employees/certifications", params={"today": good})
+            check(f"today={good!r} is accepted",
+                  res.status_code == 200 and res.json()["total"] == 4,
+                  f"{res.status_code} {res.text[:200]}")
+        found = client.get("/employees/certifications",
+                           params={"status": "Expired", "today": f" {TODAY} "}).json()
+        check("a padded but valid today computes the same validity",
+              [r["name"] for r in found["items"]] == ["PMP"], str(found["items"]))
+
+        # The day boundaries the screens use too (certificationStatus in
+        # api/employees.js, tested in frontend/tests/dates.test.mjs): the day
+        # after expiry is Expired, expiry day and 30 days ahead are Expiring
+        # soon, 31 days ahead is Valid. Asha's First Aid expires 2030-01-01;
+        # the client sends its own local day, so the server must answer for
+        # exactly the day it is given.
+        for on, expected in (("2030-01-02", "Expired"), ("2030-01-01", "Expiring soon"),
+                             ("2029-12-02", "Expiring soon"), ("2029-12-01", "Valid")):
+            rows = client.get("/employees/certifications",
+                              params={"name": "First Aid", "today": on}).json()["items"]
+            got = next(r["status"] for r in rows if r["employee_name"] == "Asha Rao")
+            check(f"First Aid expiring 2030-01-01 reads {expected} on {on}",
+                  got == expected, got)
 
         # --- vocabularies ------------------------------------------------
         check("GET /employees/designations",
@@ -521,7 +640,15 @@ def main_live():
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     offline = "--offline" in sys.argv
-    code = main_offline() if offline else main_live()
+    from verify_offline import scratch_uploads
+
+    # Every file a suite writes lands in a throwaway folder, never in the
+    # app's own uploads folder -- in live mode as much as offline.
+    uploads = scratch_uploads()
+    try:
+        code = main_offline() if offline else main_live()
+    finally:
+        uploads.cleanup()
 
     if RESULTS:
         passed = sum(1 for _, ok, _ in RESULTS if ok)

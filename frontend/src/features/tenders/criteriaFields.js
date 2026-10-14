@@ -199,33 +199,43 @@ export function paramsPayload(kind, form) {
   return params;
 }
 
-/** The first problem with a kind's form, as a sentence, or null. */
+/**
+ * Every problem with a kind's form, as one sentence per field keyed by the
+ * field's name, in the order the fields appear. Empty when it is all valid.
+ */
 export function validateParams(kind, form) {
+  const problems = {};
   for (const field of visibleFields(kind, form)) {
-    const value = form[field.name];
-    const blank = field.type === "list" ? value.length === 0 : String(value ?? "").trim() === "";
-    if (blank) {
-      if (field.required && field.type !== "checkbox") return `Please fill in ${field.label}.`;
-      continue;
+    const problem = fieldProblem(field, form[field.name]);
+    if (problem) problems[field.name] = problem;
+  }
+  return problems;
+}
+
+/** The problem with one field's value, as a sentence, or null. */
+function fieldProblem(field, value) {
+  const blank = field.type === "list" ? value.length === 0 : String(value ?? "").trim() === "";
+  if (blank) {
+    if (field.required && field.type !== "checkbox") return `Please fill in ${field.label}.`;
+    return null;
+  }
+  if (field.type === "list") {
+    if (field.max !== undefined && value.length > field.max) {
+      return `${field.label} can list at most ${field.max} entries.`;
     }
-    if (field.type === "list") {
-      if (field.max !== undefined && value.length > field.max) {
-        return `${field.label} can list at most ${field.max} entries.`;
-      }
-      continue;
+    return null;
+  }
+  if (["int", "number", "amount"].includes(field.type)) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return `${field.label} must be a number.`;
+    if (field.type === "int" && !Number.isInteger(number)) return `${field.label} must be a whole number.`;
+    const min = field.min ?? 0;
+    if (field.exclusiveMin ? number <= min : number < min) {
+      return field.exclusiveMin
+        ? `${field.label} must be more than ${min}.`
+        : `${field.label} must be at least ${min}.`;
     }
-    if (["int", "number", "amount"].includes(field.type)) {
-      const number = Number(value);
-      if (!Number.isFinite(number)) return `${field.label} must be a number.`;
-      if (field.type === "int" && !Number.isInteger(number)) return `${field.label} must be a whole number.`;
-      const min = field.min ?? 0;
-      if (field.exclusiveMin ? number <= min : number < min) {
-        return field.exclusiveMin
-          ? `${field.label} must be more than ${min}.`
-          : `${field.label} must be at least ${min}.`;
-      }
-      if (field.max !== undefined && number > field.max) return `${field.label} must be at most ${field.max}.`;
-    }
+    if (field.max !== undefined && number > field.max) return `${field.label} must be at most ${field.max}.`;
   }
   return null;
 }
@@ -305,4 +315,68 @@ export function criteriaCountLabel(criteria = []) {
   if (!criteria.length) return "Not recorded";
   const mandatory = criteria.filter((criterion) => criterion.mandatory).length;
   return `${criteria.length} (${mandatory} mandatory)`;
+}
+
+// --- compliance -----------------------------------------------------------
+//
+// Whether a criterion is met is recorded by a person, never worked out here:
+// the candidates endpoint finds records but says plainly what its rules
+// cannot decide. These helpers only read back what was recorded.
+
+/** The stored status of a criterion, defaulting for one recorded before
+ *  compliance existed. */
+export function complianceStatus(criterion) {
+  return criterion?.compliance?.status || "not_checked";
+}
+
+/** How each status reads on screen. Also the pill's colour, through the slug
+ *  StatusPill derives from it. */
+export const COMPLIANCE_LABELS = {
+  not_checked: "Not checked",
+  compliant: "Compliant",
+  not_compliant: "Not compliant",
+  undetermined: "Cannot determine",
+};
+
+/**
+ * The statuses that owe a reason. The drawer asks for one before sending;
+ * the server keeps its own copy of this list (COMPLIANCE_NEEDS_NOTE in
+ * schemas.py) and refuses the save without it, so the rule holds whatever
+ * calls the endpoint. The two must agree.
+ */
+export const COMPLIANCE_NEEDS_NOTE = ["not_compliant", "undetermined"];
+
+export function complianceLabel(criterion) {
+  const status = complianceStatus(criterion);
+  return COMPLIANCE_LABELS[status] ?? status;
+}
+
+/**
+ * Where the bid stands against what it must satisfy, for the Overview's
+ * readiness card.
+ *
+ * Counted over the mandatory criteria only: a desirable clause left
+ * unchecked is not what stops a submission, and folding the two together
+ * would hide the number that does. "Not checked" is reported as its own
+ * figure rather than as a failure -- nobody has looked yet, which is a
+ * different thing from having looked and found a gap.
+ */
+export function complianceSummary(criteria = []) {
+  const mandatory = criteria.filter((criterion) => criterion.mandatory);
+  if (!mandatory.length) return null;
+
+  const counted = { compliant: 0, not_compliant: 0, undetermined: 0, not_checked: 0 };
+  for (const criterion of mandatory) {
+    const status = complianceStatus(criterion);
+    if (status in counted) counted[status] += 1;
+    else counted.not_checked += 1;
+  }
+
+  // The figure that answers "can we submit?" leads; the rest only appear
+  // when they are not zero, so a clean tender reads as one line.
+  const parts = [`${counted.compliant} of ${mandatory.length} mandatory compliant`];
+  if (counted.not_compliant) parts.push(`${counted.not_compliant} not compliant`);
+  if (counted.undetermined) parts.push(`${counted.undetermined} cannot determine`);
+  if (counted.not_checked) parts.push(`${counted.not_checked} not checked`);
+  return parts.join(" · ");
 }

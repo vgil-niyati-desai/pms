@@ -1,8 +1,8 @@
-# Project Document Collection System
+# Procurement Management System
 
-Internal tool for logging LOI, Work Order, and Completion Certificate
-records so this evidence is ready to pull from for future tender
-submissions, instead of manually chasing people down each time.
+Internal tool for keeping the projects, people, documents and tenders a bid
+is assembled from in one place, so the evidence a tender asks for is ready
+to pull from instead of being chased down each time.
 
 Stack: React (Vite) frontend, FastAPI backend, MongoDB database (via
 pymongo). Runs entirely on internal/local infrastructure — no external or
@@ -625,6 +625,71 @@ before the PMS is distributed to anyone outside.
 `verify_mongo.py` covers all of the above, including that the selected text is
 gone from the copy's decompressed page content and that the stored original is
 byte-for-byte unchanged.
+
+## 3e-i. Saving the redacted copy to the log, and migration 0006
+
+The redaction view has a second action beside **Generate redacted copy**:
+**Save to document log**. Generate still downloads the copy and leaves nothing
+on the server. Save files it:
+
+```
+POST /documents/{id}/redacted-copy/save    log the copy as its own entry
+```
+
+It returns the new entry, which is an ordinary document in every respect --
+listed, searchable, previewable and downloadable through the same endpoints as
+any other. Three things identify it:
+
+* its file name ends `_redacted` (`cost sheet.pdf` -> `cost sheet_redacted.pdf`),
+* its notes open with `Redacted copy of <the original's file name>.`, and
+* `redacted_from_id` holds the original document's id. The Documents list
+  shows a **Redacted copy** chip for an entry that carries it.
+
+**The original is never written to.** Its stored file is opened for reading to
+generate the copy and nothing else: no `update_one` names it, no storage call
+touches it, and it keeps its own file, hash, metadata, owner and text. The copy
+is a *new* file under a new UUID and a *new* row. The link points one way only
+-- from the copy back to the original -- which is what keeps saving a copy from
+being a write to the original in any form. Afterwards the original previews,
+downloads and hashes exactly as it did before.
+
+The copy is deliberately **not** attached to the original's project, employee
+or tender. Attaching would mean writing to that owner's own `document_ids`, and
+would put a second file into an evidence tab nobody asked to change. The copy
+lands in the log; attaching it anywhere is a decision someone makes, through
+**Attach existing** like any other document.
+
+Order of operations, the same one every upload in `documents_mongo.py` uses:
+generate, hash, check for a duplicate, write the file, insert the row. A
+rejected copy leaves nothing on disk; an insert that fails takes the file it
+wrote back out. There is no state in which a file exists with no entry for it,
+and the UI reports a save only when the entry comes back.
+
+### The migration
+
+`0006_document_redacted_from_id` gives every existing document the field, set
+to None, and creates `ix_documents_redacted_from_id`. Like 0005 it derives
+nothing: redaction used to keep no trace of a copy, so there is no record to
+read provenance from. An entry whose file name merely *ends* in `_redacted` is
+reported and left alone -- a name is not provenance.
+
+**The application does not require it.** A document with no `redacted_from_id`
+reads as "not a redacted copy" either way, so the feature works on an
+un-migrated database. Run it to keep every document carrying the field
+explicitly, as 0001, 0003 and 0004 did for the ownership fields.
+
+The local and server databases are separate, so it has to be run against each
+one. From the `backend` folder, with `.env` pointing at the database you mean
+to change:
+
+```
+.\venv\Scripts\python.exe migrate.py --status     # 0006 shows as pending
+.\venv\Scripts\python.exe migrate.py --dry-run    # report only, writes nothing
+.\venv\Scripts\python.exe migrate.py              # apply it
+```
+
+It works in place, touches only the `documents` collection plus its own record
+in `migrations`, and a second run writes nothing.
 
 ## 3f. What automatic detection added
 

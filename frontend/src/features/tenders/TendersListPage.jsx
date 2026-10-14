@@ -14,8 +14,10 @@ import CheckboxGroup from "../../components/CheckboxGroup";
 import Field from "../../components/Field";
 import FormRow from "../../components/FormRow";
 import Pagination from "../../components/Pagination";
+import useHandoffNotice from "../../hooks/useHandoffNotice";
 import useQueryParams from "../../hooks/useQueryParams";
 import useResource from "../../hooks/useResource";
+import usePageRecovery, { wholePage } from "../../hooks/usePageRecovery";
 import {
   listTenders,
   listAuthorities,
@@ -53,17 +55,29 @@ const FILTER_SCHEMA = {
 export default function TendersListPage() {
   const navigate = useNavigate();
   const { values, setValues, clear } = useQueryParams(FILTER_SCHEMA);
+  // Handed over by the tender form after a delete: the record it confirms
+  // no longer exists, so this is the only screen left to say it on.
+  const [notice, setNotice] = useHandoffNotice();
 
   const openOnly = values.view === "open";
   // Open tenders are read by what is due next; everything else by what changed
   // last. An explicit sort in the URL wins over both.
   const sort = values.sort || (openOnly ? "submission_deadline" : "-updated_at");
 
+  const page = wholePage(values.page);
   const loadTenders = useCallback(
-    () => listTenders({ ...values, sort, openOnly, pageSize: PAGE_SIZE }),
-    [values, sort, openOnly],
+    () => listTenders({ ...values, page, sort, openOnly, pageSize: PAGE_SIZE }),
+    [values, page, sort, openOnly],
   );
   const tenders = useResource(loadTenders, { initialData: { items: [], total: 0 } });
+  // The page the URL names, as one that exists; see usePageRecovery.
+  const movingPage = usePageRecovery({
+    rawPage: values.page,
+    page,
+    resource: tenders,
+    pageSize: PAGE_SIZE,
+    setPage: (page) => setValues({ page }),
+  });
 
   const loadAuthorities = useCallback(() => listAuthorities(), []);
   const authorities = useResource(loadAuthorities, { initialData: [] });
@@ -199,6 +213,20 @@ export default function TendersListPage() {
       />
 
       <div className="list-layout">
+        {notice && (
+          <div className="alert alert-success notice-bar" role="status">
+            <span>{notice}</span>
+            <button
+              type="button"
+              className="notice-dismiss"
+              onClick={() => setNotice(null)}
+              aria-label="Dismiss this message"
+            >
+              &times;
+            </button>
+          </div>
+        )}
+
         <FilterBar
           showClear={filtering}
           onClear={clear}
@@ -308,18 +336,18 @@ export default function TendersListPage() {
         <section className="card list-panel">
           <div className="list-head">
             <h2>
-              {openOnly ? "Open tenders" : "All tenders"} {!tenders.loading && `(${total})`}
+              {openOnly ? "Open tenders" : "All tenders"} {!tenders.loading && !tenders.error && `(${total})`}
             </h2>
           </div>
 
           <FilterChips chips={chips} />
 
-          {tenders.error && <div className="alert alert-error">{tenders.error}</div>}
-
           <DataTable
             columns={columns}
             rows={items}
-            loading={tenders.loading}
+            loading={tenders.loading || movingPage}
+            error={tenders.error}
+            onRetry={tenders.reload}
             onRowClick={(tender) => navigate(paths.tender(tender.id))}
             empty={
               filtering ? (
@@ -358,7 +386,7 @@ export default function TendersListPage() {
           />
 
           <Pagination
-            page={values.page}
+            page={page}
             pageSize={PAGE_SIZE}
             total={total}
             onPageChange={(page) => setValues({ page })}

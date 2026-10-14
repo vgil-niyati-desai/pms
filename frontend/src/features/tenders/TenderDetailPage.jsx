@@ -1,12 +1,15 @@
 import { useCallback, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import DetailHeader from "../../components/DetailHeader";
+import DetailSkeleton from "../../components/DetailSkeleton";
 import StatusPill from "../../components/StatusPill";
 import TagChip from "../../components/TagChip";
 import Tabs from "../../components/Tabs";
+import useHandoffNotice from "../../hooks/useHandoffNotice";
 import useQueryParams from "../../hooks/useQueryParams";
 import useResource from "../../hooks/useResource";
 import {
+  OPEN_STATUSES,
   citeProject,
   getTender,
   linkDocument,
@@ -29,7 +32,7 @@ import CiteProjectDrawer from "./CiteProjectDrawer";
 import TenderCriteriaTab from "./TenderCriteriaTab";
 import CriterionDrawer from "./CriterionDrawer";
 import CandidatesDrawer from "./CandidatesDrawer";
-import { TENDER_DOCUMENT_TYPES } from "./tenderFields";
+import { TENDER_DOCUMENT_TYPES, deadlineUrgency } from "./tenderFields";
 import { paths } from "../../app/routes";
 
 // Criteria are what the tender asks for; the evidence tab is the past work
@@ -44,7 +47,10 @@ const TABS = [
 ];
 
 // Whichever drawer is open rides in the query string alongside the tab, so
-// both are linkable and Back closes the drawer.
+// both are linkable and survive a refresh. Note that useQueryParams replaces
+// rather than pushes, so Back leaves the tender rather than closing the
+// drawer -- Escape, the backdrop and Close do that, and NavigationGuard asks
+// first when the drawer holds unsaved changes.
 const VIEW_SCHEMA = {
   tab: "overview",
   cost: "",
@@ -61,6 +67,9 @@ export default function TenderDetailPage() {
   const { tenderId } = useParams();
   const navigate = useNavigate();
   const { values, setValues } = useQueryParams(VIEW_SCHEMA);
+  // Handed over by the tender form after a save -- that happens on a screen
+  // the user then leaves, so this is the only screen left to confirm it on.
+  const [notice, setNotice] = useHandoffNotice();
   // Which citation is being removed, so its own button can say so.
   const [removingProjectId, setRemovingProjectId] = useState(null);
 
@@ -149,10 +158,30 @@ export default function TenderDetailPage() {
     documents.reload();
   }
 
+  // Document saves alone report a message -- costs, certificates and
+  // criteria go through handleSaved above and stay as quiet as they always
+  // were, which is outside what this fix touches.
+  function handleDocumentSaved(outcome = {}) {
+    const { message = null } = outcome;
+    closeDrawers();
+    tender.reload();
+    documents.reload();
+    setNotice(message);
+  }
+
   // Only while there is nothing to show yet. Every cite, uncite and drawer
   // save reloads the tender, and without the data check that reload replaced
   // the whole page with "Loading..." and unmounted whichever drawer was open.
-  if (tender.loading && !tender.data) return <p className="muted">Loading...</p>;
+  if (tender.loading && !tender.data) {
+    return (
+      <>
+        <p className="muted page-note">
+          <Link to={paths.tenders()}>&larr; Tenders</Link>
+        </p>
+        <DetailSkeleton facts={4} tabs={TABS.length} />
+      </>
+    );
+  }
   // A reload that fails once the record is on screen reports inline below
   // the header instead, as the project page does.
   if (tender.error && !tender.data) {
@@ -164,6 +193,32 @@ export default function TenderDetailPage() {
     );
   }
 
+  // How close the deadline is, on exactly the terms the list uses it: only
+  // while the bid is still open, since a passed deadline on a tender already
+  // won or withdrawn is not news.
+  const urgency =
+    OPEN_STATUSES.includes(record.status) && deadlineUrgency(record.submission_deadline);
+
+  // Counts from what each tab is already given, so a tab can be seen to be
+  // empty without opening it. The tender's own arrays are on the record that
+  // got us past the guards above; the two separately loaded lists report
+  // undefined until they have something, rather than a zero they cannot
+  // vouch for. A reload after a save keeps the previous count, the way the
+  // tabs themselves keep their rows.
+  const counts = {
+    criteria: (record.criteria || []).length,
+    costs: record.cost_items.length + record.certificates.length,
+    documents:
+      documents.error || (documents.loading && tenderDocuments.length === 0)
+        ? undefined
+        : tenderDocuments.length,
+    evidence:
+      citedProjects.error || (citedProjects.loading && citedProjects.data.length === 0)
+        ? undefined
+        : citedProjects.data.length,
+  };
+  const tabs = TABS.map((tab) => ({ ...tab, count: counts[tab.key] }));
+
   return (
     <>
       <p className="muted page-note">
@@ -172,20 +227,34 @@ export default function TenderDetailPage() {
 
       <DetailHeader
         title={record.title}
+        subtitleLabel="Issuing authority"
         subtitle={record.issuing_authority}
         facts={[
           { label: "Reference no.", value: dash(record.reference_number) },
           { label: "Estimated value", value: formatAmount(record.estimated_value) },
-          { label: "Submission deadline", value: dash(record.submission_deadline) },
+          {
+            label: "Submission deadline",
+            // The date stays; the flag is the same one the list draws beside it.
+            value: (
+              <>
+                {dash(record.submission_deadline)}
+                {urgency && <span className="deadline-flag">{urgency}</span>}
+              </>
+            ),
+          },
           { label: "EMD required", value: formatAmount(record.emd_amount) },
         ]}
+        // The status is part of what this record *is*, so it reads beside
+        // the title. The tags are how it is found again, and stay below.
+        titleBadges={record.status && <StatusPill value={record.status} />}
         badges={
-          <>
-            {record.status && <StatusPill value={record.status} />}
-            {record.tags.map((tag) => (
-              <TagChip key={tag} value={tag} />
-            ))}
-          </>
+          record.tags.length ? (
+            <>
+              {record.tags.map((tag) => (
+                <TagChip key={tag} value={tag} />
+              ))}
+            </>
+          ) : null
         }
         actions={
           <>
@@ -194,7 +263,7 @@ export default function TenderDetailPage() {
               className="btn"
               onClick={() => navigate(paths.editTender(record.id))}
             >
-              Edit
+              Edit tender
             </button>
             <button
               type="button"
@@ -216,6 +285,20 @@ export default function TenderDetailPage() {
         }
       />
 
+      {notice && (
+        <div className="alert alert-success notice-bar" role="status">
+          <span>{notice}</span>
+          <button
+            type="button"
+            className="notice-dismiss"
+            onClick={() => setNotice(null)}
+            aria-label="Dismiss this message"
+          >
+            &times;
+          </button>
+        </div>
+      )}
+
       {tender.error && (
         <div className="alert alert-error">
           {tender.error} The tender below may be out of date — reload the page.
@@ -223,7 +306,7 @@ export default function TenderDetailPage() {
       )}
 
       <Tabs
-        tabs={TABS}
+        tabs={tabs}
         active={values.tab}
         onChange={(tab) =>
           setValues({ tab, cost: "", cert: "", doc: "", type: "", criterion: "", candidates: "" })
@@ -347,7 +430,7 @@ export default function TenderDetailPage() {
           onLink={(documentId) => linkDocument(record.id, documentId)}
           onUnlink={(documentId) => unlinkDocument(record.id, documentId)}
           onClose={closeDrawers}
-          onSaved={handleSaved}
+          onSaved={handleDocumentSaved}
         />
       )}
     </>

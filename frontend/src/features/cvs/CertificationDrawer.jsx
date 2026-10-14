@@ -1,10 +1,14 @@
 import { useRef, useState } from "react";
-import Drawer from "../../components/Drawer";
+import Drawer, { DrawerCancelButton } from "../../components/Drawer";
 import Field from "../../components/Field";
+import useFieldErrors from "../../hooks/useFieldErrors";
 import FormRow from "../../components/FormRow";
-import FileUpload from "../../components/FileUpload";
+import FileUpload, { takePickedFile } from "../../components/FileUpload";
 import DocumentFileSection from "../../components/DocumentFileSection";
 import ConfirmDelete from "../../components/ConfirmDelete";
+import DocumentUsageList from "../../components/DocumentUsageList";
+import useDocumentUsage from "../../hooks/useDocumentUsage";
+import useUnsavedChanges from "../../hooks/useUnsavedChanges";
 import {
   EMPTY_CERTIFICATION,
   addCertification,
@@ -44,6 +48,7 @@ export default function CertificationDrawer({ employee, certification, onClose, 
   const [file, setFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const fieldErrors = useFieldErrors();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
@@ -54,12 +59,26 @@ export default function CertificationDrawer({ employee, certification, onClose, 
   // its own. These remember that the first already succeeded, so a retry
   // finishes the job rather than starting it again -- as the attached
   // document drawer does.
+  // What closing this drawer would lose. The picked file is represented by
+  // its name: a File itself serialises to {}, so the snapshot would not see
+  // one being chosen.
+  const { dirty } = useUnsavedChanges({ ...form, _file: file ? file.name : "" });
   const createdIdRef = useRef(null);
   const deletedRef = useRef(false);
+  // A file this record shares -- with a project, a tender or another
+  // record -- is not this record's to delete. Asked when the drawer opens;
+  // a shared file is kept and only this record is removed. The delete
+  // names the same owner, so the server refuses (409) if that changed.
+  const owner = { fromEmployee: employee.id, fromItem: certification?.id };
+  const usage = useDocumentUsage(isEditing ? certification.document_id : null, owner);
+  const keepsFile = usage.otherUses.length > 0;
 
   function handleChange(e) {
-    const { name, value } = e.target;
+    const { id, name, value } = e.target;
     setForm((prev) => ({ ...prev, [name]: value }));
+    fieldErrors.clear(id);
+    // The date rule is about the pair, so editing either side settles it.
+    if (id === "cert_issue_date") fieldErrors.clear("cert_expiry_date");
   }
 
   // The details this drawer's own form decides. Everything else on the
@@ -77,7 +96,7 @@ export default function CertificationDrawer({ employee, certification, onClose, 
       documentType: CERTIFICATION_DOCUMENT_TYPE,
       subjectName: employee.full_name,
       // No uploadedBy: this drawer does not ask who uploaded the file, and the
-      // holder's name is not that -- so "Submitted by" is left empty rather
+      // holder's name is not that -- so "Added by" is left empty rather
       // than filled with the wrong person.
       ...attachmentEdits(form),
       file,
@@ -94,14 +113,12 @@ export default function CertificationDrawer({ employee, certification, onClose, 
     e.preventDefault();
     setError(null);
 
-    if (!form.name.trim()) {
-      setError("Please fill in the Certificate name.");
-      return;
-    }
+    const problems = {};
+    if (!form.name.trim()) problems.cert_name = "Please fill in the Certificate name.";
     if (form.issue_date && form.expiry_date && form.expiry_date < form.issue_date) {
-      setError("Expiry date cannot be before the issue date.");
-      return;
+      problems.cert_expiry_date = "Expiry date cannot be before the issue date.";
     }
+    if (fieldErrors.report(problems)) return;
 
     setSubmitting(true);
     try {
@@ -141,14 +158,17 @@ export default function CertificationDrawer({ employee, certification, onClose, 
     try {
       // Once the file is gone a retry must not delete it again: it would 404
       // and never reach the record itself.
-      if (certification.document_id && !deletedRef.current) {
-        await deleteAttachment(certification.document_id);
+      if (certification.document_id && !keepsFile && !deletedRef.current) {
+        await deleteAttachment(certification.document_id, owner);
         deletedRef.current = true;
       }
       await deleteCertification(employee.id, certification.id);
       onSaved();
     } catch (err) {
       setDeleteError(err.message || "Could not delete this certification.");
+      // Something else started using the file: ask again, which turns the
+      // dialog into the keep-the-file one with the reason shown.
+      if (err.status === 409) usage.reload();
       setDeleting(false);
     }
   }
@@ -159,15 +179,22 @@ export default function CertificationDrawer({ employee, certification, onClose, 
         title={isEditing ? "Edit certification" : "Add certification"}
         onClose={onClose}
         dismissable={!submitting && !deleting}
+        dirty={dirty}
       >
         <form onSubmit={handleSubmit}>
+          {fieldErrors.summary && <div className="alert alert-error">{fieldErrors.summary}</div>}
           {error && <div className="alert alert-error">{error}</div>}
 
           <p className="muted hint drawer-context">
             {employee.full_name} &middot; {employee.designation}
           </p>
 
-          <Field label="Certificate name *" htmlFor="cert_name">
+          <Field
+            label="Certificate name *"
+            htmlFor="cert_name"
+            required
+            error={fieldErrors.errors.cert_name}
+          >
             <input
               id="cert_name"
               name="name"
@@ -213,6 +240,7 @@ export default function CertificationDrawer({ employee, certification, onClose, 
               label="Expiry date"
               htmlFor="cert_expiry_date"
               hint="Leave empty if it does not expire."
+              error={fieldErrors.errors.cert_expiry_date}
             >
               <input
                 id="cert_expiry_date"
@@ -235,7 +263,10 @@ export default function CertificationDrawer({ employee, certification, onClose, 
                   : "No file attached yet."
                 : null
             }
-            onChange={(e) => setFile(e.target.files[0] || null)}
+            error={fieldErrors.errors.cert_file}
+            onChange={(e) =>
+              takePickedFile(e, { fieldId: "cert_file", fieldErrors, setFile })
+            }
             ref={fileInputRef}
           />
 
@@ -253,22 +284,16 @@ export default function CertificationDrawer({ employee, certification, onClose, 
             <button type="submit" className="btn btn-primary" disabled={submitting || deleting}>
               {submitting ? "Saving..." : isEditing ? "Save changes" : "Add certification"}
             </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={onClose}
-              disabled={submitting || deleting}
-            >
-              Cancel
-            </button>
+            {/* Asks first when something is unsaved, like every other way out. */}
+            <DrawerCancelButton disabled={submitting || deleting} />
             {isEditing && (
               <button
                 type="button"
                 className="btn btn-danger form-actions-end"
                 onClick={() => setConfirmingDelete(true)}
-                disabled={submitting || deleting}
+                disabled={submitting || deleting || usage.pending}
               >
-                Delete
+                {usage.pending ? "Checking where it is used..." : "Delete"}
               </button>
             )}
           </div>
@@ -284,27 +309,40 @@ export default function CertificationDrawer({ employee, certification, onClose, 
       </Drawer>
 
       {confirmingDelete && (
-        <ConfirmDelete
-          title="Delete this certification?"
-          confirmLabel="Delete certification"
-          busy={deleting}
-          error={deleteError}
-          onConfirm={handleDelete}
-          onCancel={() => {
-            setConfirmingDelete(false);
-            setDeleteError(null);
-          }}
-        >
-          <p className="muted">
-            {certification.name} — {employee.full_name}
-          </p>
-          <p className="muted">
-            {certification.file_name
-              ? `The record and its uploaded file (${certification.file_name}) will be permanently removed.`
-              : "The record will be permanently removed."}{" "}
-            This cannot be undone.
-          </p>
-        </ConfirmDelete>
+        <div className="drawer-confirm-layer">
+          <ConfirmDelete
+            title="Delete this certification?"
+            confirmLabel="Delete certification"
+            busy={deleting}
+            error={deleteError}
+            onConfirm={handleDelete}
+            onCancel={() => {
+              setConfirmingDelete(false);
+              setDeleteError(null);
+            }}
+          >
+            <p className="muted">
+              {certification.name} — {employee.full_name}
+            </p>
+            {keepsFile ? (
+              <>
+                <p className="muted">The file is kept, because it is also used by:</p>
+                <DocumentUsageList uses={usage.otherUses} />
+                <p className="muted">
+                  Only this certification record is removed. The file stays available to them. This cannot be
+                  undone.
+                </p>
+              </>
+            ) : (
+              <p className="muted">
+                {certification.file_name
+                  ? `The record and its uploaded file (${certification.file_name}) will be permanently removed.`
+                  : "The record will be permanently removed."}{" "}
+                This cannot be undone.
+              </p>
+            )}
+          </ConfirmDelete>
+        </div>
       )}
     </>
   );

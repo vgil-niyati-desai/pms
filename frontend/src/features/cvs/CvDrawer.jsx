@@ -1,10 +1,15 @@
 import { useRef, useState } from "react";
-import Drawer from "../../components/Drawer";
+import Drawer, { DrawerCancelButton } from "../../components/Drawer";
 import Field from "../../components/Field";
+import useFieldErrors from "../../hooks/useFieldErrors";
 import FormRow from "../../components/FormRow";
-import FileUpload from "../../components/FileUpload";
+import FileUpload, { takePickedFile } from "../../components/FileUpload";
 import DocumentFileSection from "../../components/DocumentFileSection";
 import ConfirmDelete from "../../components/ConfirmDelete";
+import DocumentUsageList from "../../components/DocumentUsageList";
+import useDocumentUsage from "../../hooks/useDocumentUsage";
+import useUnsavedChanges from "../../hooks/useUnsavedChanges";
+import useRememberedAddedBy from "../../hooks/useRememberedAddedBy";
 import { addCv, updateCv, deleteCv, EMPTY_CV } from "../../api/employees";
 import {
   CV_DOCUMENT_TYPE,
@@ -25,12 +30,19 @@ function formFromCv(cv) {
 export default function CvDrawer({ employee, cv, onClose, onSaved }) {
   const isEditing = Boolean(cv);
 
+  // Whoever uploaded the last CV. See the hook for why only a new upload
+  // feeds this back.
+  const [rememberedAddedBy, rememberAddedBy] = useRememberedAddedBy();
+
   const [form, setForm] = useState(() =>
-    cv ? formFromCv(cv) : { version_label: "", purpose: "", cv_date: "", uploaded_by: "" },
+    cv
+      ? formFromCv(cv)
+      : { version_label: "", purpose: "", cv_date: "", uploaded_by: rememberedAddedBy },
   );
   const [file, setFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const fieldErrors = useFieldErrors();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
@@ -41,8 +53,19 @@ export default function CvDrawer({ employee, cv, onClose, onSaved }) {
   // its own. These remember that the first already succeeded, so a retry
   // finishes the job rather than starting it again -- as the attached
   // document drawer does.
+  // What closing this drawer would lose. The picked file is represented by
+  // its name: a File itself serialises to {}, so the snapshot would not see
+  // one being chosen.
+  const { dirty } = useUnsavedChanges({ ...form, _file: file ? file.name : "" });
   const createdIdRef = useRef(null);
   const deletedRef = useRef(false);
+  // A file this record shares -- with a project, a tender or another
+  // record -- is not this record's to delete. Asked when the drawer opens;
+  // a shared file is kept and only this record is removed. The delete
+  // names the same owner, so the server refuses (409) if that changed.
+  const owner = { fromEmployee: employee.id, fromItem: cv?.id };
+  const usage = useDocumentUsage(isEditing ? cv.document_id : null, owner);
+  const keepsFile = usage.otherUses.length > 0;
 
   function handleChange(e) {
     const { name, value } = e.target;
@@ -79,10 +102,9 @@ export default function CvDrawer({ employee, cv, onClose, onSaved }) {
     e.preventDefault();
     setError(null);
 
-    if (!isEditing && !file) {
-      setError("Choose a CV file to upload.");
-      return;
-    }
+    const problems = {};
+    if (!isEditing && !file) problems.cv_file = "Choose a CV file to upload.";
+    if (fieldErrors.report(problems)) return;
 
     setSubmitting(true);
     try {
@@ -107,6 +129,8 @@ export default function CvDrawer({ employee, cv, onClose, onSaved }) {
       const values = { ...form, ...attachment };
       if (isEditing) await updateCv(employee.id, cv.id, values);
       else await addCv(employee.id, values);
+      // Only a new upload: see the hook for why an edit does not feed this.
+      if (!isEditing) rememberAddedBy(form.uploaded_by);
       onSaved();
     } catch (err) {
       setError(err.message || "Could not save this CV.");
@@ -120,14 +144,17 @@ export default function CvDrawer({ employee, cv, onClose, onSaved }) {
     try {
       // Once the file is gone a retry must not delete it again: it would 404
       // and never reach the record itself.
-      if (cv.document_id && !deletedRef.current) {
-        await deleteAttachment(cv.document_id);
+      if (cv.document_id && !keepsFile && !deletedRef.current) {
+        await deleteAttachment(cv.document_id, owner);
         deletedRef.current = true;
       }
       await deleteCv(employee.id, cv.id);
       onSaved();
     } catch (err) {
       setDeleteError(err.message || "Could not delete this CV.");
+      // Something else started using the file: ask again, which turns the
+      // dialog into the keep-the-file one with the reason shown.
+      if (err.status === 409) usage.reload();
       setDeleting(false);
     }
   }
@@ -138,8 +165,10 @@ export default function CvDrawer({ employee, cv, onClose, onSaved }) {
         title={isEditing ? "Edit CV" : "Upload CV"}
         onClose={onClose}
         dismissable={!submitting && !deleting}
+        dirty={dirty}
       >
         <form onSubmit={handleSubmit}>
+          {fieldErrors.summary && <div className="alert alert-error">{fieldErrors.summary}</div>}
           {error && <div className="alert alert-error">{error}</div>}
 
           <p className="muted hint drawer-context">
@@ -198,6 +227,8 @@ export default function CvDrawer({ employee, cv, onClose, onSaved }) {
             id="cv_file"
             name="cv_file"
             label={isEditing ? "Replace file (optional)" : "CV file (PDF, PNG, or JPG) *"}
+            required={!isEditing}
+            error={fieldErrors.errors.cv_file}
             hint={
               isEditing
                 ? cv.file_name
@@ -205,7 +236,9 @@ export default function CvDrawer({ employee, cv, onClose, onSaved }) {
                   : "No file attached yet."
                 : null
             }
-            onChange={(e) => setFile(e.target.files[0] || null)}
+            onChange={(e) =>
+              takePickedFile(e, { fieldId: "cv_file", fieldErrors, setFile })
+            }
             ref={fileInputRef}
           />
 
@@ -213,22 +246,16 @@ export default function CvDrawer({ employee, cv, onClose, onSaved }) {
             <button type="submit" className="btn btn-primary" disabled={submitting || deleting}>
               {submitting ? "Saving..." : isEditing ? "Save changes" : "Upload CV"}
             </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={onClose}
-              disabled={submitting || deleting}
-            >
-              Cancel
-            </button>
+            {/* Asks first when something is unsaved, like every other way out. */}
+            <DrawerCancelButton disabled={submitting || deleting} />
             {isEditing && (
               <button
                 type="button"
                 className="btn btn-danger form-actions-end"
                 onClick={() => setConfirmingDelete(true)}
-                disabled={submitting || deleting}
+                disabled={submitting || deleting || usage.pending}
               >
-                Delete
+                {usage.pending ? "Checking where it is used..." : "Delete"}
               </button>
             )}
           </div>
@@ -240,27 +267,40 @@ export default function CvDrawer({ employee, cv, onClose, onSaved }) {
       </Drawer>
 
       {confirmingDelete && (
-        <ConfirmDelete
-          title="Delete this CV?"
-          confirmLabel="Delete CV"
-          busy={deleting}
-          error={deleteError}
-          onConfirm={handleDelete}
-          onCancel={() => {
-            setConfirmingDelete(false);
-            setDeleteError(null);
-          }}
-        >
-          <p className="muted">
-            {cvLabel(cv)} — {employee.full_name}
-          </p>
-          <p className="muted">
-            {cv.file_name
-              ? `This version and its uploaded file (${cv.file_name}) will be permanently removed.`
-              : "This version will be permanently removed."}{" "}
-            This cannot be undone.
-          </p>
-        </ConfirmDelete>
+        <div className="drawer-confirm-layer">
+          <ConfirmDelete
+            title="Delete this CV?"
+            confirmLabel="Delete CV"
+            busy={deleting}
+            error={deleteError}
+            onConfirm={handleDelete}
+            onCancel={() => {
+              setConfirmingDelete(false);
+              setDeleteError(null);
+            }}
+          >
+            <p className="muted">
+              {cvLabel(cv)} — {employee.full_name}
+            </p>
+            {keepsFile ? (
+              <>
+                <p className="muted">The file is kept, because it is also used by:</p>
+                <DocumentUsageList uses={usage.otherUses} />
+                <p className="muted">
+                  Only this version is removed. The file stays available to them. This cannot be
+                  undone.
+                </p>
+              </>
+            ) : (
+              <p className="muted">
+                {cv.file_name
+                  ? `This version and its uploaded file (${cv.file_name}) will be permanently removed.`
+                  : "This version will be permanently removed."}{" "}
+                This cannot be undone.
+              </p>
+            )}
+          </ConfirmDelete>
+        </div>
       )}
     </>
   );

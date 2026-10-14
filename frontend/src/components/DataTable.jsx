@@ -1,6 +1,10 @@
+import { TableSkeleton } from "./Skeleton";
+
 /**
- * Table driven by a column config, with the loading and empty states the
- * list screens all need.
+ * Table driven by a column config, with the loading, error and empty states
+ * the list screens all need -- shown one at a time, in that order of
+ * precedence. `error` is the failed load's message and `onRetry` reloads it;
+ * a table given neither behaves exactly as before.
  *
  * A column is `{ key, header, render?, className? }`. `render(row)` takes
  * over the cell when a value needs a link, a pill, or buttons; otherwise the
@@ -23,9 +27,32 @@ export default function DataTable({
   onRowClick,
   loading = false,
   loadingMessage = "Loading...",
+  skeletonRows = 5,
   empty = null,
+  error = null,
+  onRetry,
 }) {
-  if (loading) return <p className="muted">{loadingMessage}</p>;
+  // The table's own shape rather than a line of text where a table was: the
+  // headers and the box stay put and the cells fill in. `loadingMessage` is
+  // what a screen reader is told, since the placeholder itself is for the eye.
+  if (loading) {
+    return <TableSkeleton columns={columns} rows={skeletonRows} message={loadingMessage} />;
+  }
+  // A failed load is not an empty result. Shown in place of both the rows --
+  // which would be the previous request's, not this one's -- and the empty
+  // state, whose "No projects yet" would claim something nobody knows.
+  if (error) {
+    return (
+      <div className="alert alert-error table-error" role="alert">
+        <span>{error}</span>
+        {onRetry && (
+          <button type="button" className="btn btn-sm" onClick={onRetry}>
+            Try again
+          </button>
+        )}
+      </div>
+    );
+  }
   if (!rows.length) return empty;
 
   function handleRowClick(event, row) {

@@ -232,3 +232,28 @@ def _patch_positional_projection():
     Collection.find_one = find_one
     _PROJECTION_PATCHED = True
 
+
+
+def scratch_uploads():
+    """Send every file a suite writes to a throwaway folder.
+
+    `storage.UPLOAD_DIR` is read each time a path is resolved, so pointing it
+    at a temporary directory for the length of a run keeps the app's own
+    `app/uploads/` folder untouched -- in live mode as much as offline, since
+    the live mode's throwaway database is no protection for files on disk.
+    The checks that count files in the folder also stop depending on nobody
+    else writing there meanwhile.
+
+    Returns the TemporaryDirectory; the caller's `cleanup()` removes it. A
+    file still held open on Windows is ignored rather than failing the run.
+    """
+    import tempfile
+
+    from app import storage
+
+    scratch = tempfile.TemporaryDirectory(
+        prefix="pms-verify-uploads-", ignore_cleanup_errors=True
+    )
+    storage.UPLOAD_DIR = scratch.name
+    print(f"  (uploads go to throwaway folder {scratch.name}; app/uploads is not touched)")
+    return scratch

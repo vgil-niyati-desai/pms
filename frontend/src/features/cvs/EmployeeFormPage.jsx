@@ -2,8 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import Field from "../../components/Field";
 import FormRow from "../../components/FormRow";
+import FormSkeleton from "../../components/FormSkeleton";
 import ConfirmDelete from "../../components/ConfirmDelete";
+import ConfirmDiscard from "../../components/ConfirmDiscard";
 import useResource from "../../hooks/useResource";
+import useUnsavedChanges from "../../hooks/useUnsavedChanges";
+import useFieldErrors from "../../hooks/useFieldErrors";
 import {
   EMPTY_EMPLOYEE,
   createEmployee,
@@ -48,6 +52,7 @@ export default function EmployeeFormPage() {
   const [form, setForm] = useState(EMPTY_EMPLOYEE);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const fieldErrors = useFieldErrors();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
@@ -58,6 +63,28 @@ export default function EmployeeFormPage() {
   );
   const existing = useResource(loadEmployee);
 
+  // Where Cancel goes, and whether it should ask first.
+  const cancelTo = isEditing ? paths.employee(employeeId) : paths.cvs();
+  const [confirmingLeave, setConfirmingLeave] = useState(false);
+  // The baseline is derived from the record rather than captured: the effect
+  // below loads it a render late, so a captured one would be the blank form
+  // and the loaded employee would read as somebody's unsaved change. Before it
+  // arrives -- and on a new employee -- the blank form is its own baseline.
+  // `release` comes before every navigation this page makes on purpose, so
+  // the app-wide guard does not stop the page's own save, delete or discard.
+  const { dirty, release } = useUnsavedChanges(
+    form,
+    existing.data ? formFromEmployee(existing.data) : EMPTY_EMPLOYEE,
+  );
+
+  function requestCancel() {
+    if (dirty) {
+      setConfirmingLeave(true);
+      return;
+    }
+    navigate(cancelTo);
+  }
+
   useEffect(() => {
     if (existing.data) setForm(formFromEmployee(existing.data));
   }, [existing.data]);
@@ -65,23 +92,31 @@ export default function EmployeeFormPage() {
   function handleChange(e) {
     const { name, value } = e.target;
     setForm((prev) => ({ ...prev, [name]: value }));
+    fieldErrors.clear(name);
   }
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError(null);
 
-    if (!form.full_name.trim() || !form.designation.trim()) {
-      setError("Please fill in Full name and Designation.");
-      return;
-    }
+    const problems = {};
+    if (!form.full_name.trim()) problems.full_name = "Please fill in Full name.";
+    if (!form.designation.trim()) problems.designation = "Please fill in Designation.";
+    if (fieldErrors.report(problems)) return;
 
     setSubmitting(true);
     try {
       const saved = isEditing
         ? await updateEmployee(employeeId, form)
         : await createEmployee(form);
-      navigate(paths.employee(saved.id), { replace: true });
+      // Confirmed on the record screen, since that is where this lands.
+      release();
+      navigate(paths.employee(saved.id), {
+        replace: true,
+        state: {
+          notice: isEditing ? "Employee saved." : "Employee created.",
+        },
+      });
     } catch (err) {
       setError(err.message || "Could not save this employee.");
       setSubmitting(false);
@@ -93,7 +128,14 @@ export default function EmployeeFormPage() {
     setDeleteError(null);
     try {
       await deleteEmployee(employeeId);
-      navigate(paths.cvs(), { replace: true });
+      // The record is gone, so the confirmation belongs on the list.
+      release();
+      navigate(paths.cvs(), {
+        replace: true,
+        state: {
+          notice: "Employee deleted. Files already uploaded stay in the document log.",
+        },
+      });
     } catch (err) {
       setDeleteError(err.message || "Could not delete this employee.");
       setDeleting(false);
@@ -101,7 +143,11 @@ export default function EmployeeFormPage() {
   }
 
   // Only an edit has something to wait for; the create form is ready at once.
-  if (isEditing && existing.loading) return <p className="muted">Loading...</p>;
+  // Name/code, designation/department, the two experience dates,
+  // qualification/email, phone/skills -- then notes below it.
+  if (isEditing && existing.loading) {
+    return <FormSkeleton rows={5} wide={["textarea"]} />;
+  }
   if (existing.error) {
     return (
       <div className="card">
@@ -119,10 +165,11 @@ export default function EmployeeFormPage() {
       <form className="card form" onSubmit={handleSubmit}>
         <h2>{isEditing ? "Edit employee" : "New employee"}</h2>
 
+        {fieldErrors.summary && <div className="alert alert-error">{fieldErrors.summary}</div>}
         {error && <div className="alert alert-error">{error}</div>}
 
         <FormRow>
-          <Field label="Full name *" htmlFor="full_name">
+          <Field label="Full name *" htmlFor="full_name" required error={fieldErrors.errors.full_name}>
             <input
               id="full_name"
               name="full_name"
@@ -143,7 +190,12 @@ export default function EmployeeFormPage() {
         </FormRow>
 
         <FormRow>
-          <Field label="Designation *" htmlFor="designation">
+          <Field
+            label="Designation *"
+            htmlFor="designation"
+            required
+            error={fieldErrors.errors.designation}
+          >
             <input
               id="designation"
               name="designation"
@@ -241,9 +293,16 @@ export default function EmployeeFormPage() {
           <button type="submit" className="btn btn-primary" disabled={submitting}>
             {submitting ? "Saving..." : isEditing ? "Save changes" : "Create employee"}
           </button>
-          <Link className="btn" to={isEditing ? paths.employee(employeeId) : paths.cvs()}>
+          {/* A button, not a link: leaving with something unsaved asks first,
+              and a Link would already be gone by the time it could. */}
+          <button
+            type="button"
+            className="btn"
+            onClick={requestCancel}
+            disabled={submitting}
+          >
             Cancel
-          </Link>
+          </button>
           {isEditing && (
             <button
               type="button"
@@ -256,6 +315,18 @@ export default function EmployeeFormPage() {
           )}
         </div>
       </form>
+
+      {confirmingLeave && (
+        <ConfirmDiscard
+          body="This employee has changes that have not been saved. Leaving now loses them."
+          onKeep={() => setConfirmingLeave(false)}
+          onDiscard={() => {
+            setConfirmingLeave(false);
+            release();
+            navigate(cancelTo);
+          }}
+        />
+      )}
 
       {confirmingDelete && (
         <ConfirmDelete

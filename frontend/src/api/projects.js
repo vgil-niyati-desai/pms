@@ -65,6 +65,22 @@ export async function listProjectDocuments(projectId) {
 }
 
 /**
+ * The tenders that cite this project as past experience:
+ * `[{ id, title, issuing_authority, reference_number, status,
+ * submission_deadline }]`, by deadline, newest first.
+ *
+ * The other direction of the citation api/tenders.js reads with
+ * listTenderProjects. The relationship is stored once, on the tender, and
+ * followed here rather than duplicated: the project is not changed by being
+ * cited, and holds no list of its own.
+ */
+export async function listProjectTenders(projectId) {
+  return requestJson(`/projects/${projectId}/tenders`, {
+    fallback: "Failed to load the tenders citing this project",
+  });
+}
+
+/**
  * One page of projects: `{ items, total, page, page_size }`.
  *
  * Each item carries `document_types`: the distinct document types that project
@@ -81,6 +97,10 @@ export async function listProjects(filters = {}) {
     tagMode = "any",
     status = "",
     has = [],
+    endDateFrom = "",
+    endDateTo = "",
+    minValue = "",
+    maxValue = "",
     sort = "-updated_at",
     page = 1,
     pageSize = 10,
@@ -93,6 +113,13 @@ export async function listProjects(filters = {}) {
     tags,
     tag_mode: tags.length > 1 ? tagMode : "any",
     has,
+    // The bounds a tender's experience clauses ask in: what the work was
+    // worth, and when it finished. Compared server-side, where contract_value
+    // is read as a number and the dates compare as ISO text.
+    end_date_from: endDateFrom,
+    end_date_to: endDateTo,
+    min_value: minValue,
+    max_value: maxValue,
     sort,
     page,
     page_size: pageSize,

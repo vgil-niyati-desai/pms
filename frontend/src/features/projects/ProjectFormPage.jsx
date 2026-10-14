@@ -2,9 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import Field from "../../components/Field";
 import FormRow from "../../components/FormRow";
+import FormSkeleton from "../../components/FormSkeleton";
 import TagInput from "../../components/TagInput";
 import ConfirmDelete from "../../components/ConfirmDelete";
+import ConfirmDiscard from "../../components/ConfirmDiscard";
 import useResource from "../../hooks/useResource";
+import useUnsavedChanges from "../../hooks/useUnsavedChanges";
+import useFieldErrors from "../../hooks/useFieldErrors";
 import {
   EMPTY_PROJECT,
   PROJECT_STATUSES,
@@ -33,6 +37,7 @@ export default function ProjectFormPage() {
   const [form, setForm] = useState(EMPTY_PROJECT);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const fieldErrors = useFieldErrors();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
@@ -46,6 +51,28 @@ export default function ProjectFormPage() {
   const loadTags = useCallback(() => listTags(), []);
   const tags = useResource(loadTags, { initialData: [] });
 
+  // Where Cancel goes, and whether it should ask first.
+  const cancelTo = isEditing ? paths.project(projectId) : paths.projects();
+  const [confirmingLeave, setConfirmingLeave] = useState(false);
+  // The baseline is derived from the record rather than captured: the effect
+  // below loads it a render late, so a captured one would be the blank form
+  // and the loaded project would read as somebody's unsaved change. Before it
+  // arrives -- and on a new project -- the blank form is its own baseline.
+  // `release` comes before every navigation this page makes on purpose, so
+  // the app-wide guard does not stop the page's own save, delete or discard.
+  const { dirty, release } = useUnsavedChanges(
+    form,
+    existing.data ? formFromProject(existing.data) : EMPTY_PROJECT,
+  );
+
+  function requestCancel() {
+    if (dirty) {
+      setConfirmingLeave(true);
+      return;
+    }
+    navigate(cancelTo);
+  }
+
   useEffect(() => {
     if (existing.data) setForm(formFromProject(existing.data));
   }, [existing.data]);
@@ -53,20 +80,22 @@ export default function ProjectFormPage() {
   function handleChange(e) {
     const { name, value } = e.target;
     setForm((prev) => ({ ...prev, [name]: value }));
+    fieldErrors.clear(name);
+    // The date rule is about the pair, so editing either side settles it.
+    if (name === "start_date") fieldErrors.clear("end_date");
   }
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError(null);
 
-    if (!form.title.trim() || !form.client_name.trim()) {
-      setError("Please fill in Project title and Client / organization.");
-      return;
-    }
+    const problems = {};
+    if (!form.title.trim()) problems.title = "Please fill in Project title.";
+    if (!form.client_name.trim()) problems.client_name = "Please fill in Client / organization.";
     if (form.start_date && form.end_date && form.start_date > form.end_date) {
-      setError("End date cannot be before start date.");
-      return;
+      problems.end_date = "End date cannot be before start date.";
     }
+    if (fieldErrors.report(problems)) return;
 
     setSubmitting(true);
     try {
@@ -74,6 +103,7 @@ export default function ProjectFormPage() {
         ? await updateProject(projectId, form)
         : await createProject(form);
       // Confirmed on the record screen, since that is where this lands.
+      release();
       navigate(paths.project(saved.id), {
         replace: true,
         state: {
@@ -96,6 +126,7 @@ export default function ProjectFormPage() {
     try {
       await deleteProject(projectId);
       // The record is gone, so the confirmation belongs on the list.
+      release();
       navigate(paths.projects(), {
         replace: true,
         state: {
@@ -109,7 +140,11 @@ export default function ProjectFormPage() {
   }
 
   // Only an edit has something to wait for; the create form is ready at once.
-  if (isEditing && existing.loading) return <p className="muted">Loading...</p>;
+  // Title/client, reference/contract value, start/end date, status/department
+  // -- then the tag input and the two textareas below it.
+  if (isEditing && existing.loading) {
+    return <FormSkeleton rows={4} wide={["control", "textarea", "textarea"]} />;
+  }
   if (existing.error) {
     return (
       <div className="card">
@@ -125,13 +160,19 @@ export default function ProjectFormPage() {
       <form className="card form" onSubmit={handleSubmit}>
         <h2>{isEditing ? "Edit project" : "New project"}</h2>
 
+        {fieldErrors.summary && <div className="alert alert-error">{fieldErrors.summary}</div>}
         {error && <div className="alert alert-error">{error}</div>}
 
         <FormRow>
-          <Field label="Project title *" htmlFor="title">
+          <Field label="Project title *" htmlFor="title" required error={fieldErrors.errors.title}>
             <input id="title" name="title" type="text" value={form.title} onChange={handleChange} />
           </Field>
-          <Field label="Client / organization *" htmlFor="client_name">
+          <Field
+            label="Client / organization *"
+            htmlFor="client_name"
+            required
+            error={fieldErrors.errors.client_name}
+          >
             <input
               id="client_name"
               name="client_name"
@@ -174,7 +215,7 @@ export default function ProjectFormPage() {
               onChange={handleChange}
             />
           </Field>
-          <Field label="End date" htmlFor="end_date">
+          <Field label="End date" htmlFor="end_date" error={fieldErrors.errors.end_date}>
             <input
               id="end_date"
               name="end_date"
@@ -232,12 +273,16 @@ export default function ProjectFormPage() {
           <button type="submit" className="btn btn-primary" disabled={submitting}>
             {submitting ? "Saving..." : isEditing ? "Save changes" : "Create project"}
           </button>
-          <Link
+          {/* A button, not a link: leaving with something unsaved asks first,
+              and a Link would already be gone by the time it could. */}
+          <button
+            type="button"
             className="btn"
-            to={isEditing ? paths.project(projectId) : paths.projects()}
+            onClick={requestCancel}
+            disabled={submitting}
           >
             Cancel
-          </Link>
+          </button>
           {isEditing && (
             <button
               type="button"
@@ -250,6 +295,18 @@ export default function ProjectFormPage() {
           )}
         </div>
       </form>
+
+      {confirmingLeave && (
+        <ConfirmDiscard
+          body="This project has changes that have not been saved. Leaving now loses them."
+          onKeep={() => setConfirmingLeave(false)}
+          onDiscard={() => {
+            setConfirmingLeave(false);
+            release();
+            navigate(cancelTo);
+          }}
+        />
+      )}
 
       {confirmingDelete && (
         <ConfirmDelete

@@ -9,6 +9,7 @@ from pydantic import (
 )
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from datetime import date, datetime
+import re
 
 
 class DocumentFields(BaseModel):
@@ -61,6 +62,15 @@ class DocumentFields(BaseModel):
     # document in its own document_ids, and this answers "whose is this?"
     # without reading every tender.
     tender_id: Optional[str] = None
+    # The document this entry is a redacted copy of, as that document's own
+    # id, or None for an ordinary entry -- which is almost all of them.
+    #
+    # Not an owner like the three above it: it records provenance, points the
+    # other way, and is written once when the copy is logged. The original is
+    # not told about the copy and is not modified in any way by its existence,
+    # so there is deliberately no field on the original pointing forwards; the
+    # copies of a document are found by querying this one.
+    redacted_from_id: Optional[str] = None
     created_at: datetime
 
 
@@ -72,6 +82,21 @@ class DocumentMongoOut(DocumentFields):
     """
 
     id: str
+
+
+class DocumentUsage(BaseModel):
+    """One record that uses a document, worked out from the references the
+    records already hold -- nothing here is stored.
+
+    `roles` says how it uses it, in words the screens can show as written:
+    "attached document", "CV", "certification", "cost receipt",
+    "submitted certificate".
+    """
+
+    kind: Literal["project", "tender", "employee"]
+    id: str
+    label: str
+    roles: List[str] = Field(default_factory=list)
 
 
 class DocumentPage(BaseModel):
@@ -105,6 +130,53 @@ def _required(value: str, label: str) -> str:
     return text
 
 
+# The input rules below mirror the checks the React forms already make, as a
+# backstop for anything reaching the API another way. They are applied to the
+# *In models only: the *Out models read stored records back, and a record
+# saved before these rules existed must still load rather than fail the
+# response.
+
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def check_iso_date(value: Optional[str], label: str) -> Optional[str]:
+    """A date field must be blank or a real `YYYY-MM-DD` date — what
+    <input type="date"> produces, and the only form that orders correctly
+    when dates are compared as strings."""
+    if value is None or str(value).strip() == "":
+        return value
+    text = str(value).strip()
+    try:
+        if not _ISO_DATE.fullmatch(text):
+            raise ValueError
+        date.fromisoformat(text)
+    except ValueError:
+        raise ValueError(f"{label} must be a date in YYYY-MM-DD form.")
+    return text
+
+
+def _check_order(start: Optional[str], end: Optional[str], message: str) -> None:
+    """Refuse an end date before its start date when both are given. Both
+    have already passed check_iso_date, so comparing the strings is safe."""
+    if start and end and end < start:
+        raise ValueError(message)
+
+
+def _check_status(value: Optional[str], allowed) -> Optional[str]:
+    """Blank, or one of the values the form's dropdown offers."""
+    if value is None or value == "":
+        return value
+    if value not in allowed:
+        raise ValueError("Status must be one of: " + ", ".join(allowed) + ".")
+    return value
+
+
+# The dropdown options, matching PROJECT_STATUSES and TENDER_STATUSES in the
+# frontend's api/projects.js and api/tenders.js; the lists must agree.
+PROJECT_STATUSES = ("Ongoing", "Completed")
+TENDER_STATUSES = ("Identified", "Preparing", "Submitted", "Won", "Lost", "Withdrawn")
+
+
 class ProjectFields(BaseModel):
     """The fields the project form owns.
 
@@ -115,11 +187,10 @@ class ProjectFields(BaseModel):
     "5,00,000" and is not arithmetic anyone does here.
     """
 
-    # Only the title is enforced: the list screen renders each project as a
-    # link whose text *is* the title, so a blank one would leave a record
-    # nobody can see or click — a functional break, not a policy choice.
-    # Every other field is display metadata and stays open-ended until the
-    # business rules for what must be captured are settled.
+    # The title is enforced everywhere: the list screen renders each project
+    # as a link whose text *is* the title, so a blank one would leave a record
+    # nobody can see or click. The form's other rules (client, dates, status)
+    # are enforced on ProjectIn only, so older records still read back.
     title: str
     client_name: Optional[str] = None
     reference_number: Optional[str] = None
@@ -162,6 +233,29 @@ class ProjectIn(ProjectFields):
     Deliberately does not carry id, document_ids or the timestamps: those are
     the server's, and a form post must not be able to rewrite them.
     """
+
+    client_name: str
+
+    @field_validator("client_name")
+    @classmethod
+    def _check_client(cls, value: str) -> str:
+        return _required(value, "Client / organization")
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def _check_dates(cls, value: Optional[str], info) -> Optional[str]:
+        label = "Start date" if info.field_name == "start_date" else "End date"
+        return check_iso_date(value, label)
+
+    @field_validator("status")
+    @classmethod
+    def _check_project_status(cls, value: Optional[str]) -> Optional[str]:
+        return _check_status(value, PROJECT_STATUSES)
+
+    @model_validator(mode="after")
+    def _check_date_order(self):
+        _check_order(self.start_date, self.end_date, "End date cannot be before start date.")
+        return self
 
 
 class ProjectOut(ProjectFields):
@@ -225,8 +319,9 @@ class EmployeeFields(BaseModel):
     """
 
     # full_name is enforced for the same reason a project's title is: it is
-    # the text of the record's link in the list. Nothing else is, including
-    # designation — the form still asks for it, an import need not.
+    # the text of the record's link in the list. Designation, which the form
+    # also requires, is enforced on EmployeeIn only, so older records still
+    # read back.
     full_name: str
     employee_code: Optional[str] = None
     designation: Optional[str] = None
@@ -293,8 +388,15 @@ class EmployeeIn(EmployeeFields):
     nested records have their own endpoints, and the rest is the server's.
     """
 
+    designation: str
 
-class CvIn(BaseModel):
+    @field_validator("designation")
+    @classmethod
+    def _check_designation(cls, value: str) -> str:
+        return _required(value, "Designation")
+
+
+class CvFields(BaseModel):
     """One version of an employee's CV.
 
     document_id points at the uploaded file in the document log; the frontend
@@ -310,12 +412,19 @@ class CvIn(BaseModel):
     file_name: Optional[str] = None
 
 
-class CvOut(CvIn):
+class CvIn(CvFields):
+    @field_validator("cv_date")
+    @classmethod
+    def _check_cv_date(cls, value: Optional[str]) -> Optional[str]:
+        return check_iso_date(value, "CV date")
+
+
+class CvOut(CvFields):
     id: str
     created_at: datetime
 
 
-class CertificationIn(BaseModel):
+class CertificationFields(BaseModel):
     """One certification held by an employee.
 
     Whether it is valid, expired, or has no expiry is never stored — it is a
@@ -333,7 +442,31 @@ class CertificationIn(BaseModel):
     file_name: Optional[str] = None
 
 
-class CertificationOut(CertificationIn):
+class CertificationIn(CertificationFields):
+    """What the certification drawer sends, held to the drawer's own rules."""
+
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, value: str) -> str:
+        return _required(value, "Certificate name")
+
+    @field_validator("issue_date", "expiry_date")
+    @classmethod
+    def _check_dates(cls, value: Optional[str], info) -> Optional[str]:
+        label = "Issue date" if info.field_name == "issue_date" else "Expiry date"
+        return check_iso_date(value, label)
+
+    @model_validator(mode="after")
+    def _check_date_order(self):
+        _check_order(
+            self.issue_date, self.expiry_date, "Expiry date cannot be before the issue date."
+        )
+        return self
+
+
+class CertificationOut(CertificationFields):
     id: str
     created_at: datetime
 
@@ -464,10 +597,45 @@ class TenderFields(BaseModel):
 class TenderIn(TenderFields):
     """What the tender form sends. No cost items, certificates, document ids
     or timestamps: the nested records have their own endpoints, attachment is
-    its own call, and the rest is the server's."""
+    its own call, and the rest is the server's.
+
+    Holds the form's value rules -- money, dates, status -- without making
+    authority or status required, per the note on TenderFields."""
+
+    @field_validator("emd_amount")
+    @classmethod
+    def _check_emd(cls, value: Optional[str]) -> Optional[str]:
+        return _non_negative_amount(value, "EMD amount")
+
+    @field_validator("tender_fee")
+    @classmethod
+    def _check_fee(cls, value: Optional[str]) -> Optional[str]:
+        return _non_negative_amount(value, "Tender fee")
+
+    @field_validator("published_date", "submission_deadline")
+    @classmethod
+    def _check_dates(cls, value: Optional[str], info) -> Optional[str]:
+        label = (
+            "Published date" if info.field_name == "published_date" else "Submission deadline"
+        )
+        return check_iso_date(value, label)
+
+    @field_validator("status")
+    @classmethod
+    def _check_tender_status(cls, value: Optional[str]) -> Optional[str]:
+        return _check_status(value, TENDER_STATUSES)
+
+    @model_validator(mode="after")
+    def _check_date_order(self):
+        _check_order(
+            self.published_date,
+            self.submission_deadline,
+            "The submission deadline cannot be before the published date.",
+        )
+        return self
 
 
-class CostItemIn(BaseModel):
+class CostItemFields(BaseModel):
     """One cost paid to pursue the tender: EMD, tender fee, DD charges.
 
     document_id points at the payment receipt in the document log, stored
@@ -490,12 +658,19 @@ class CostItemIn(BaseModel):
         return _non_negative_amount(value, "Amount")
 
 
-class CostItemOut(CostItemIn):
+class CostItemIn(CostItemFields):
+    @field_validator("paid_on")
+    @classmethod
+    def _check_paid_on(cls, value: Optional[str]) -> Optional[str]:
+        return check_iso_date(value, "Paid on")
+
+
+class CostItemOut(CostItemFields):
     id: str
     created_at: datetime
 
 
-class TenderCertificateIn(BaseModel):
+class TenderCertificateFields(BaseModel):
     """One certificate submitted with the bid."""
 
     name: Optional[str] = None
@@ -508,7 +683,29 @@ class TenderCertificateIn(BaseModel):
     file_name: Optional[str] = None
 
 
-class TenderCertificateOut(TenderCertificateIn):
+class TenderCertificateIn(TenderCertificateFields):
+    """What the certificate drawer sends, held to the drawer's own rules."""
+
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, value: str) -> str:
+        return _required(value, "Certificate name")
+
+    @field_validator("valid_from", "valid_to")
+    @classmethod
+    def _check_dates(cls, value: Optional[str], info) -> Optional[str]:
+        label = "Valid from" if info.field_name == "valid_from" else "Valid to"
+        return check_iso_date(value, label)
+
+    @model_validator(mode="after")
+    def _check_date_order(self):
+        _check_order(self.valid_from, self.valid_to, "Valid to cannot be before valid from.")
+        return self
+
+
+class TenderCertificateOut(TenderCertificateFields):
     id: str
     created_at: datetime
 
@@ -950,6 +1147,78 @@ def validate_criterion(data: Any) -> Any:
         )
 
 
+# --- compliance ------------------------------------------------------------
+#
+# Whether the bid meets a criterion is a judgement someone records, never a
+# value the system works out. app/matching.py finds candidate records but is
+# explicit about what it cannot decide -- whether work is *similar*, what a
+# project was worth, an employee's experience, what the company holds -- so
+# a computed verdict would be confidently wrong on nearly every kind.
+#
+# "Not checked" and "cannot be determined" are kept apart deliberately: the
+# first means nobody has looked yet, the second that someone has and the
+# recorded data does not settle it. Only the second is a finding, and reading
+# an unchecked criterion as one would make the readiness summary claim
+# findings about a tender nobody has been through.
+#
+# Compliance travels on its own endpoint rather than on the criterion body,
+# for the reason citing a project does: a criterion PUT replaces the whole
+# requirement, so a drawer opened before someone recorded compliance would
+# reset it on save.
+
+COMPLIANCE_STATUSES = ("not_checked", "compliant", "not_compliant", "undetermined")
+
+# The two that say nothing useful to the next person without a reason. The
+# rule itself is enforced in the router, beside the other business rules
+# criteria carry ("a criterion's type cannot be changed"), because those
+# answer with a plain sentence the drawer can show as written -- where a
+# model validator's message reaches the screen wearing Pydantic's own
+# "Value error, " in front of it.
+COMPLIANCE_NEEDS_NOTE = ("not_compliant", "undetermined")
+
+
+class CriterionCompliance(BaseModel):
+    """Whether this criterion is met, as recorded by a person.
+
+    Returned as stored, like `params`: a status written by a later version of
+    this app reads back as itself rather than failing the response.
+    """
+
+    status: str = "not_checked"
+    note: Optional[str] = None
+    decided_by: Optional[str] = None
+    decided_at: Optional[datetime] = None
+
+
+class CriterionComplianceIn(BaseModel):
+    """What the compliance endpoint accepts. `decided_at` is the server's."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["not_checked", "compliant", "not_compliant", "undetermined"]
+    note: Optional[str] = None
+    decided_by: Optional[str] = None
+
+    @field_validator("note")
+    @classmethod
+    def _clean_note(cls, value: Optional[str]) -> Optional[str]:
+        return _clean_text(value, _MAX_LONG_TEXT)
+
+    @field_validator("decided_by")
+    @classmethod
+    def _clean_decided_by(cls, value: Optional[str]) -> Optional[str]:
+        return _clean_text(value)
+
+    def owes_a_reason(self) -> bool:
+        """Whether this is a finding recorded without saying why.
+
+        Read after the note has been cleaned, so whitespace does not pass for
+        a reason. "Compliant" and "Not checked" owe nothing: the first is the
+        expected state, the second the absence of a judgement.
+        """
+        return self.status in COMPLIANCE_NEEDS_NOTE and not self.note
+
+
 class CriterionOut(BaseModel):
     """A stored criterion. `params` is returned as stored; its shape was
     checked against `kind` on the way in."""
@@ -962,6 +1231,10 @@ class CriterionOut(BaseModel):
     source_text: Optional[str] = None
     notes: Optional[str] = None
     params: Dict[str, Any] = Field(default_factory=dict)
+    # Criteria stored before compliance existed carry no such field and read
+    # as "not checked", so nothing needs migrating -- the same arrangement
+    # that let criteria themselves appear on tenders saved before them.
+    compliance: CriterionCompliance = Field(default_factory=CriterionCompliance)
     created_at: datetime
     updated_at: datetime
 
@@ -991,6 +1264,27 @@ class TenderPage(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class ProjectCitationOut(BaseModel):
+    """One tender that cites a project, read from the project's side.
+
+    The same relationship `cited_project_ids` already holds, followed the
+    other way: /tenders/{id}/projects answers "what does this bid put
+    forward", this answers "where has this project been put forward".
+
+    Deliberately not a whole TenderOut. The project screen asks which bids
+    cited it and how they went, so it is sent the handful of fields that
+    answer that -- not every bid's criteria, cost items and certificates,
+    none of which are anything to do with the project being looked at.
+    """
+
+    id: str
+    title: str
+    issuing_authority: Optional[str] = None
+    reference_number: Optional[str] = None
+    status: Optional[str] = None
+    submission_deadline: Optional[str] = None
 
 
 class CandidateOut(BaseModel):

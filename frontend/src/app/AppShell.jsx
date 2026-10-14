@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import Drawer from "../components/Drawer";
+import ErrorBoundary from "../components/ErrorBoundary";
+import NavigationGuard from "./NavigationGuard";
+import { UnsavedChangesProvider } from "./UnsavedChangesContext";
 import { AREAS, sectionForPath } from "./routes";
 
 function AreaNav({ onNavigate }) {
@@ -39,52 +42,55 @@ export default function AppShell() {
     setNavOpen(false);
   }, [location.pathname]);
 
+  // The provider sits above everything a form can render in, and the guard
+  // sits last so, at an equal z-index, it paints over the document preview.
   return (
-    <div className="shell">
-      <aside className="sidebar">
-        <div className="brand">Procurement MS</div>
-        <AreaNav />
-      </aside>
+    <UnsavedChangesProvider>
+      <div className="shell">
+        <aside className="sidebar">
+          <div className="brand">Procurement MS</div>
+          <AreaNav />
+        </aside>
 
-      <div className="shell-main">
-        <header className="topbar">
-          <button
-            type="button"
-            className="nav-toggle"
-            onClick={() => setNavOpen(true)}
-            aria-label="Open navigation"
-            aria-expanded={navOpen}
-          >
-            &#9776;
-          </button>
-          <h1 className="topbar-title">{section ? section.label : "Procurement MS"}</h1>
-          {action && (
+        <div className="shell-main">
+          <header className="topbar">
             <button
               type="button"
-              className="btn btn-primary"
-              onClick={() => navigate(action.path)}
-              disabled={!action.available}
-              title={
-                action.available
-                  ? undefined
-                  : `${action.label} becomes available when the ${section.label} module is built.`
-              }
+              className="nav-toggle"
+              onClick={() => setNavOpen(true)}
+              aria-label="Open navigation"
+              aria-expanded={navOpen}
             >
-              {action.label}
+              &#9776;
             </button>
-          )}
-        </header>
+            <h1 className="topbar-title">{section ? section.label : "Procurement MS"}</h1>
+            {action && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => navigate(action.path)}
+              >
+                {action.label}
+              </button>
+            )}
+          </header>
 
-        <main className="content">
-          <Outlet />
-        </main>
+          <main className="content">
+            {/* Keyed on the path so navigating away from a crashed page recovers. */}
+            <ErrorBoundary key={location.pathname}>
+              <Outlet />
+            </ErrorBoundary>
+          </main>
+        </div>
+
+        {navOpen && (
+          <Drawer title="Menu" side="left" onClose={() => setNavOpen(false)}>
+            <AreaNav onNavigate={() => setNavOpen(false)} />
+          </Drawer>
+        )}
+
+        <NavigationGuard />
       </div>
-
-      {navOpen && (
-        <Drawer title="Menu" side="left" onClose={() => setNavOpen(false)}>
-          <AreaNav onNavigate={() => setNavOpen(false)} />
-        </Drawer>
-      )}
-    </div>
+    </UnsavedChangesProvider>
   );
 }

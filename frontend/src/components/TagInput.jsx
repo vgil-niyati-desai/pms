@@ -5,9 +5,21 @@ import TagChip from "./TagChip";
 /**
  * Free-text tag entry with suggestions from the tags already in use.
  * Enter or comma commits a tag; Backspace on an empty box removes the last.
+ *
+ * `id` names the text box, for a form that needs to find it again -- to move
+ * focus to it when `error` flags it, say. Without one an id is generated.
  */
-export default function TagInput({ label = "Tags", value, onChange, suggestions = [], hint }) {
-  const inputId = useId();
+export default function TagInput({
+  id,
+  label = "Tags",
+  value,
+  onChange,
+  suggestions = [],
+  hint,
+  error,
+}) {
+  const generatedId = useId();
+  const inputId = id ?? generatedId;
   const listId = `${inputId}-suggestions`;
   const [text, setText] = useState("");
 
@@ -36,7 +48,7 @@ export default function TagInput({ label = "Tags", value, onChange, suggestions 
   );
 
   return (
-    <Field label={label} htmlFor={inputId} hint={hint}>
+    <Field label={label} htmlFor={inputId} hint={hint} error={error}>
       <div className="tag-input">
         {value.map((tag) => (
           <TagChip key={tag} value={tag} onRemove={() => onChange(value.filter((t) => t !== tag))} />
@@ -49,6 +61,12 @@ export default function TagInput({ label = "Tags", value, onChange, suggestions 
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
           onBlur={() => addTag(text)}
+          // Nested inside the chip box, so Field cannot reach it to add these.
+          aria-invalid={error ? true : undefined}
+          aria-describedby={
+            [error && `${inputId}-error`, hint && `${inputId}-hint`].filter(Boolean).join(" ") ||
+            undefined
+          }
           placeholder={value.length ? "" : "Type a tag and press Enter"}
         />
         <datalist id={listId}>

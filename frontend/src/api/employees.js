@@ -13,6 +13,7 @@
  */
 
 import { queryString, requestJson, requestNoContent } from "./http";
+import { addDays, localToday } from "../lib/dates";
 
 /** Field defaults, and the canonical field list for an employee record.
  *  Also the list of what the profile form may send — createEmployee and
@@ -86,18 +87,28 @@ export function sortedCvs(employee) {
   });
 }
 
+/** Certificates due to expire within this many days read as "Expiring soon"
+ *  rather than "Valid" right up to the day they lapse. Matches the window
+ *  the flattened certification index computes server-side
+ *  (CERTIFICATION_EXPIRY_SOON_DAYS in routers/employees_mongo.py), so the two
+ *  views can never disagree about what "soon" means. */
+export const CERTIFICATION_EXPIRY_SOON_DAYS = 30;
+
 /**
- * Whether a certificate has lapsed. `today` is passed in so the caller
- * decides what "now" means, and so this stays testable. The flattened index
- * gets its status from the server; this covers the per-employee tab, which
- * renders certifications straight off the employee record.
+ * Whether a certificate has lapsed, is due to lapse soon, or is fine.
+ * `today` is passed in so the caller decides what "now" means, and so this
+ * stays testable. The flattened index gets its status from the server; this
+ * covers the per-employee tab, which renders certifications straight off the
+ * employee record.
  */
-export function certificationStatus(certification, today = new Date().toISOString().slice(0, 10)) {
+export function certificationStatus(certification, today = localToday()) {
   if (!certification.expiry_date) return "No expiry";
-  return certification.expiry_date < today ? "Expired" : "Valid";
+  if (certification.expiry_date < today) return "Expired";
+  const soon = addDays(today, CERTIFICATION_EXPIRY_SOON_DAYS);
+  return certification.expiry_date <= soon ? "Expiring soon" : "Valid";
 }
 
-export const CERTIFICATION_STATUSES = ["Valid", "Expired", "No expiry"];
+export const CERTIFICATION_STATUSES = ["Valid", "Expiring soon", "Expired", "No expiry"];
 
 // --- employees ----------------------------------------------------------
 
@@ -207,7 +218,7 @@ export const deleteCertification = (employeeId, certificationId) =>
 /**
  * Every certification held by anyone, flattened so "who holds a PMP?" is one
  * filter rather than a walk through every profile. The client sends `today`
- * itself — the same UTC day certificationStatus has always defaulted to — so
+ * itself — the same local calendar day certificationStatus defaults to — so
  * the index and the per-employee tab can never disagree about what Expired
  * means.
  */
@@ -220,7 +231,7 @@ export async function listCertifications(filters = {}) {
     sort = "name",
     page = 1,
     pageSize = 10,
-    today = new Date().toISOString().slice(0, 10),
+    today = localToday(),
   } = filters;
 
   const query = queryString({

@@ -442,6 +442,14 @@ img {
   border-left-color: var(--warn);
   color: #97330A;
 }
+/* A table's failed load: the message, with its retry button at the end. */
+.table-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
 
 /* A confirmation that something worked, with a way to put it away before it
    times out on its own. The text takes the width and the control keeps its
@@ -595,6 +603,29 @@ input[type="file"]::file-selector-button:hover {
 .field {
   margin-bottom: 16px;
   min-width: 0;
+}
+/* A field that failed validation: the control's border and ring take the
+   error colour, and the message sits directly under it. */
+.field-invalid input,
+.field-invalid select,
+.field-invalid textarea,
+.field-invalid input:hover:not(:disabled):not(:focus),
+.field-invalid select:hover:not(:disabled):not(:focus),
+.field-invalid textarea:hover:not(:disabled):not(:focus) {
+  border-color: var(--warn);
+}
+.field-invalid input:focus,
+.field-invalid select:focus,
+.field-invalid textarea:focus {
+  border-color: var(--warn);
+  box-shadow: 0 0 0 3px rgba(194, 65, 12, 0.16);
+}
+.field-error {
+  font-size: 12.5px;
+  font-weight: 500;
+  margin: 7px 0 0 0;
+  color: #97330A;
+  overflow-wrap: anywhere;
 }
 
 .form-actions {
@@ -876,6 +907,7 @@ tbody td:first-child {
 .tag-ongoing::before,
 .tag-completed::before,
 .tag-valid::before,
+.tag-expiring-soon::before,
 .tag-expired::before,
 .tag-no-expiry::before,
 .tag-identified::before,
@@ -883,7 +915,11 @@ tbody td:first-child {
 .tag-submitted::before,
 .tag-won::before,
 .tag-lost::before,
-.tag-withdrawn::before {
+.tag-withdrawn::before,
+.tag-compliant::before,
+.tag-not-compliant::before,
+.tag-cannot-determine::before,
+.tag-not-checked::before {
   content: "";
   flex-shrink: 0;
   width: 6px;
@@ -912,8 +948,10 @@ tbody td:first-child {
 .tag-ongoing { background: var(--accent-soft); color: var(--accent); }
 .tag-completed { background: var(--good-soft); color: var(--good); }
 
-/* Certificate validity */
+/* Certificate validity. Expiring soon is amber rather than red: it is a
+   warning to act on, not yet the failure "Expired" is. */
 .tag-valid { background: var(--good-soft); color: var(--good); }
+.tag-expiring-soon { background: var(--amber-soft); color: var(--amber); }
 .tag-expired { background: var(--warn-soft); color: var(--warn); }
 .tag-no-expiry { background: var(--paper); color: var(--ink-soft); }
 
@@ -929,6 +967,15 @@ tbody td:first-child {
 /* Qualification criteria: a condition of the bid, or only in its favour. */
 .tag-mandatory { background: var(--accent-soft); color: var(--accent); }
 .tag-desirable { background: var(--paper); color: var(--ink-soft); }
+
+/* Whether the bid meets a criterion. "Cannot determine" is amber rather than
+   red: someone looked and the data did not settle it, which is a job to
+   finish, not a failure. "Not checked" stays neutral — nobody has looked
+   yet, and colouring it would read as a finding about the tender. */
+.tag-compliant { background: var(--good-soft); color: var(--good); }
+.tag-not-compliant { background: var(--warn-soft); color: var(--warn); }
+.tag-cannot-determine { background: var(--amber-soft); color: var(--amber); }
+.tag-not-checked { background: var(--paper); color: var(--ink-soft); }
 
 .tag-neutral {
   gap: 3px;
@@ -1147,11 +1194,6 @@ tbody td:first-child {
   max-width: 100%;
   flex: 1;
 }
-.filter-buttons {
-  display: flex;
-  gap: 8px;
-  flex: 0 0 auto;
-}
 
 .filter-chips {
   display: flex;
@@ -1264,6 +1306,13 @@ tbody td:first-child {
 .tag-input:focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.field-invalid .tag-input {
+  border-color: var(--warn);
+}
+.field-invalid .tag-input:focus-within {
+  border-color: var(--warn);
+  box-shadow: 0 0 0 3px rgba(194, 65, 12, 0.16);
 }
 
 /* An inset track with a raised active segment — the state reads at a glance
@@ -1472,6 +1521,70 @@ tbody td:first-child {
 .tab-active:hover {
   color: var(--accent);
   border-bottom-color: var(--accent);
+}
+/* How much the tab holds. Quieter than the label, because it is information
+   about the tab rather than part of its name. */
+.tab-count {
+  font-weight: 600;
+  color: var(--ink-faint);
+}
+.tab-active .tab-count {
+  color: var(--accent);
+  opacity: 0.7;
+}
+
+/* ---- loading placeholders -------------------------------------------- */
+
+/* A quiet block standing in for text that has not loaded. The shimmer is a
+   highlight travelling over a flat fill rather than an animated fill, so the
+   reduced-motion rule near the top of this sheet -- which cuts every animation
+   to its last frame -- leaves a plain block instead of a half-drawn gradient. */
+.skeleton {
+  display: block;
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--line-soft);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.8), transparent);
+  animation: skeleton-sweep 1.4s var(--ease) infinite;
+}
+@keyframes skeleton-sweep {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* The title and subtitle stand-ins have no text to size them, so this takes
+   the width the action buttons leave and the percentages inside it mean
+   something. */
+.detail-skeleton-identity {
+  display: grid;
+  gap: 7px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* Borrowing .tab for the strip's geometry, but these are not buttons. */
+.detail-skeleton .tab {
+  cursor: default;
+}
+
+/* A create/edit form's shape while the record it edits loads: .form, .field
+   and .form-row are the real form's own classes, reused so the spacing is
+   identical rather than approximated. Only the gap between a field's label
+   and its control needs its own rule -- a real <label> gets that from its
+   own margin, which these placeholders have nothing standing in for. */
+.form-skeleton .field {
+  display: grid;
+  gap: 6px;
+}
+.form-skeleton > .skeleton:first-child {
+  margin-bottom: 16px;
 }
 
 /* ---- evidence strip -------------------------------------------------- */
@@ -1804,6 +1917,13 @@ tbody td:first-child {
   display: flex;
   z-index: 20;
   animation: scrim-in 140ms var(--ease);
+}
+/* A confirmation a drawer opens beside itself. A Modal is z-index 10, under
+   the drawer's 20, so without this layer the question is painted behind the
+   drawer it is about and cannot be clicked. */
+.drawer-confirm-layer {
+  position: relative;
+  z-index: 30;
 }
 /* The panel floats clear of the window edges rather than butting against
    them, which is what keeps it reading as a layer over the screen. */
@@ -2497,6 +2617,56 @@ img.file-preview-fill {
   align-items: flex-start;
   gap: 12px;
   width: 100%;
+}
+
+/* ---- dashboard --------------------------------------------------------- */
+
+/* Four counts, each a link to the filtered list that already answers it.
+   auto-fit rather than a fixed column count: the tiles reflow on their own
+   as the window narrows, and the .card media-query rules below already
+   retune padding for them along with every other card. */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 18px;
+  margin-bottom: 0;
+}
+.stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* The grid gap owns the spacing, the same reasoning .list-layout > .card
+     overrides .card's own margin for. */
+  margin-bottom: 0;
+  color: inherit;
+  text-decoration: none;
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+}
+.stat-tile:hover,
+.stat-tile:focus-visible {
+  border-color: var(--accent-line);
+  box-shadow: var(--shadow-md);
+}
+.stat-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+.stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+/* A tile whose own request failed: the dash stays, with a small marker. */
+.stat-error {
+  font-size: 14px;
+  color: var(--warn);
+}
+/* The one tile that is a warning rather than a plain count: a non-zero
+   figure here is something to act on, so it reads that way before the
+   number is even parsed. */
+.stat-tile-warn .stat-value {
+  color: var(--warn);
 }
 
 /* ---- responsive ------------------------------------------------------ */

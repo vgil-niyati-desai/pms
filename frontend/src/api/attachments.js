@@ -105,10 +105,14 @@ export async function updateAttachment(documentId, details) {
  * Deletes an attachment's document. One that is already gone counts as
  * deleted: a retry after the first attempt succeeded on the server but its
  * response was lost must go on to remove the record, not stop at a 404.
+ *
+ * `owner` names the record holding the attachment (`{ fromEmployee |
+ * fromTender, fromItem }`), so the server refuses with a 409 when anything
+ * else uses the same document.
  */
-export async function deleteAttachment(documentId) {
+export async function deleteAttachment(documentId, owner) {
   try {
-    await deleteDocument(documentId);
+    await deleteDocument(documentId, owner);
   } catch (err) {
     if (err.status !== 404) throw err;
   }

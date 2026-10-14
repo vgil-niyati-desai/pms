@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useRequestDrawerClose } from "../../components/Drawer";
 import EmptyState from "../../components/EmptyState";
 import SearchInput from "../../components/SearchInput";
 import StatusPill from "../../components/StatusPill";
@@ -45,6 +46,9 @@ export default function AttachExistingDocument({
   busy = false,
 }) {
   const shared = Boolean(tenderId);
+  // Inside a drawer, Cancel closes through its guarded close, so anything
+  // typed on the "Upload new" tab is asked about rather than dropped.
+  const cancel = useRequestDrawerClose() ?? onCancel;
   const [query, setQuery] = useState("");
   const [attachingId, setAttachingId] = useState(null);
   const [error, setError] = useState(null);
@@ -164,8 +168,15 @@ export default function AttachExistingDocument({
               // the server allows the attach, so the row must offer it too.
               const elsewhere =
                 !shared && !isAttached && Boolean(document.project_id) && owner !== null;
+              // On a project, a document a person or a bid also uses can still
+              // be attached -- but it stays theirs too, so the project will
+              // only be able to remove it, not delete it. Said up front.
               const staysWith = !shared
-                ? null
+                ? document.employee_id
+                  ? "Also used by an employee's CV or certification — this project could only remove it, not delete it"
+                  : document.tender_id
+                    ? "Also used by a tender — this project could only remove it, not delete it"
+                    : null
                 : document.project_id
                   ? "Stays with its project"
                   : document.employee_id
@@ -226,7 +237,7 @@ export default function AttachExistingDocument({
       )}
 
       <div className="form-actions">
-        <button type="button" className="btn" onClick={onCancel} disabled={disabled}>
+        <button type="button" className="btn" onClick={cancel} disabled={disabled}>
           Cancel
         </button>
       </div>

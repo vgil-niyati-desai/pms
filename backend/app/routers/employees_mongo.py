@@ -17,6 +17,7 @@ Two shapes live here:
     question that should be one filter, not a walk through every profile.
 """
 
+import math
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -66,10 +67,21 @@ EXPERIENCE_SORT_SOURCE = {
 CERT_SORTABLE = {"name", "issuing_body", "employee_name", "issue_date", "expiry_date", "status"}
 CERT_DEFAULT_SORT = "name"
 
+# A certificate due to expire within this many days is flagged rather than
+# left to read as "Valid" until the day it lapses -- the same window on the
+# flattened index and the per-employee tab (api/employees.js's
+# certificationStatus mirrors this), so the two can never disagree about what
+# "soon" means.
+CERTIFICATION_EXPIRY_SOON_DAYS = 30
+
 SEARCH_FIELDS = ["full_name", "designation", "highest_qualification", "employee_code", "key_skills"]
 CERT_SEARCH_FIELDS = ["name", "issuing_body", "certificate_number", "employee_name"]
 
 MAX_PAGE_SIZE = 200
+# The furthest page a list may ask for. Far past any real list, and far short
+# of the skip MongoDB can no longer represent -- which a page like 10**20
+# reached, as a 500. Beyond the last page is still a normal, empty page.
+MAX_PAGE = 100_000
 
 
 def _now_utc_ms() -> datetime:
@@ -273,6 +285,17 @@ def _today_utc() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def _date_in_days(days: int, today: str) -> str:
+    """The ISO date `days` after `today`.
+
+    The other direction of _date_years_ago below: turns the "expiring soon"
+    window into a date bound, so the comparison stays a plain string
+    comparison against the stored expiry_date rather than per-document
+    arithmetic.
+    """
+    return (date.fromisoformat(today) + timedelta(days=days)).isoformat()
+
+
 def _date_years_ago(years: float, today: str) -> str:
     """The ISO date `years` before `today`.
 
@@ -361,15 +384,51 @@ def _search_clause(q: Optional[str], fields: List[str]) -> Optional[Dict[str, An
     return {"$or": [{field: pattern} for field in fields]}
 
 
-def _parse_years(value: Optional[str]) -> Optional[float]:
-    """A querystring experience bound as a number, or None when absent or
-    unparseable — an unusable bound is ignored, not an error."""
+# The most years an experience filter may ask about. Far beyond any career,
+# and far short of where the date arithmetic in _date_years_ago runs out of
+# calendar -- which is what a bound like 5000 used to hit, as a 500.
+MAX_EXPERIENCE_YEARS = 100
+
+
+def _query_error(param: str, message: str) -> HTTPException:
+    """A 422 for one querystring value, in the shape FastAPI gives its own
+    validation errors, so the screens show `message` as written."""
+    return HTTPException(
+        status_code=422,
+        detail=[{"type": "value_error", "loc": ["query", param], "msg": message}],
+    )
+
+
+def _parse_years(value: Optional[str], param: str, label: str) -> Optional[float]:
+    """A querystring experience bound in years, or None when absent.
+
+    Anything else that is not a finite number from 0 to MAX_EXPERIENCE_YEARS
+    is refused with a 422 rather than ignored: dropping the bound would show
+    an unfiltered list as if it were the filtered one.
+    """
     if value is None or str(value).strip() == "":
         return None
     try:
-        return float(str(value).strip())
+        years = float(str(value).strip())
     except ValueError:
-        return None
+        years = math.nan
+    if not math.isfinite(years) or not 0 <= years <= MAX_EXPERIENCE_YEARS:
+        raise _query_error(
+            param, f"{label} must be a number of years from 0 to {MAX_EXPERIENCE_YEARS}."
+        )
+    return years
+
+
+def _parse_today(value: Optional[str]) -> str:
+    """The `today` a caller passes, checked as a real YYYY-MM-DD date, or
+    today in UTC when it passes none. A malformed one is a 422, not a 500."""
+    if value is None or not value.strip():
+        return _today_utc()
+    try:
+        schemas.check_iso_date(value, "today")
+    except ValueError as exc:
+        raise _query_error("today", str(exc))
+    return value.strip()
 
 
 # --------------------------------------------------------------------------
@@ -410,7 +469,7 @@ def list_certification_index(
     status: Optional[str] = None,
     today: Optional[str] = None,
     sort: str = CERT_DEFAULT_SORT,
-    page: int = Query(default=1, ge=1),
+    page: int = Query(default=1, ge=1, le=MAX_PAGE),
     page_size: int = Query(default=10, ge=1, le=MAX_PAGE_SIZE),
     employees: Collection = Depends(get_employee_records),
 ):
@@ -421,9 +480,16 @@ def list_certification_index(
     day can differ from the server's); absent that, today in UTC.
 
     ISO dates compare correctly as strings, which is what makes the Expired
-    test a plain string comparison.
+    and Expiring soon tests plain string comparisons. "Expiring soon" is
+    everything not yet expired but due within CERTIFICATION_EXPIRY_SOON_DAYS,
+    so a lapsed certificate is never read as merely due soon.
     """
-    on = today.strip() if today and today.strip() else _today_utc()
+    on = _parse_today(today)
+    try:
+        soon = _date_in_days(CERTIFICATION_EXPIRY_SOON_DAYS, on)
+    except OverflowError:
+        # A real date, but too close to year 9999 to count days forward from.
+        raise _query_error("today", "today is too far in the future.")
 
     # Paths here are relative to the unwound employee document, where the
     # certification still sits under its field name.
@@ -432,7 +498,13 @@ def list_certification_index(
         "$cond": [
             {"$eq": [expiry, ""]},
             "No expiry",
-            {"$cond": [{"$lt": [expiry, on]}, "Expired", "Valid"]},
+            {
+                "$cond": [
+                    {"$lt": [expiry, on]},
+                    "Expired",
+                    {"$cond": [{"$lte": [expiry, soon]}, "Expiring soon", "Valid"]},
+                ]
+            },
         ]
     }
 
@@ -506,7 +578,7 @@ def list_employees(
     min_experience: Optional[str] = None,
     max_experience: Optional[str] = None,
     sort: str = DEFAULT_SORT,
-    page: int = Query(default=1, ge=1),
+    page: int = Query(default=1, ge=1, le=MAX_PAGE),
     page_size: int = Query(default=10, ge=1, le=MAX_PAGE_SIZE),
     employees: Collection = Depends(get_employee_records),
 ):
@@ -549,8 +621,8 @@ def list_employees(
     # with no experience recorded did not satisfy a numeric range before.
     today = _today_utc()
     bounds: Dict[str, Any] = {}
-    minimum = _parse_years(min_experience)
-    maximum = _parse_years(max_experience)
+    minimum = _parse_years(min_experience, "min_experience", "Minimum experience")
+    maximum = _parse_years(max_experience, "max_experience", "Maximum experience")
     if minimum is not None:
         bounds["$lte"] = _date_years_ago(minimum, today)
     if maximum is not None:

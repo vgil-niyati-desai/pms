@@ -120,18 +120,19 @@ def run_suite(projects, documents, offline=False):
               bool(first["created_at"]) and first["created_at"] == first["updated_at"])
 
         # --- required vs open-ended fields ------------------------------
-        # Only the title is enforced (the list links on it); which other
-        # fields must be captured is unsettled business policy, so the API
-        # does not police them - the form still does its own asking.
+        # The title (the list links on it) and the client, as on the form;
+        # every other field is open-ended.
         check("POST with a blank title -> 422 (the list links on it)",
               client.post("/projects/", json={"title": "   ", "client_name": "X"}).status_code == 422)
-        res = client.post("/projects/", json={"title": "Only a title"})
-        ok = check("a title alone is enough; every other field is open-ended",
+        check("POST without a client -> 422 (the form requires one)",
+              client.post("/projects/", json={"title": "Only a title"}).status_code == 422)
+        res = client.post("/projects/", json={"title": "Only a title", "client_name": "X"})
+        ok = check("a title and client are enough; every other field is open-ended",
                    res.status_code == 201, res.text)
         if ok:
             bare = res.json()
             check("the blanks come back as blanks, not invented defaults",
-                  bare["client_name"] is None and bare["status"] is None and bare["tags"] == [])
+                  bare["start_date"] is None and bare["status"] is None and bare["tags"] == [])
             client.delete("/projects/{i}".format(i=bare["id"]))
 
         # --- more records to filter and sort ----------------------------
@@ -238,6 +239,25 @@ def run_suite(projects, documents, offline=False):
               f"{titles(one)} then {titles(two)}")
         check("a page past the end is empty rather than an error",
               client.get("/projects/", params={"page": 99}).json()["items"] == [])
+
+        # Page numbers are whole numbers from 1 to MAX_PAGE; anything else is a
+        # 422 naming `page`, never a 500 (10**20 used to overflow the skip). A
+        # page past the end is an ordinary empty page that still reports the
+        # total, which is what lets the screens move back to the last page.
+        for path in ('/projects/',):
+            for bad in ("0", "-1", "2.5", "abc", "100001", "100000000000000000000"):
+                res = client.get(path, params={"page": bad})
+                check(f"{path}?page={bad} is refused with a 422 naming page",
+                      res.status_code == 422 and res.json()["detail"][0]["loc"] == ["query", "page"],
+                      f"{res.status_code} {res.text[:150]}")
+            total = client.get(path).json()["total"]
+            far = client.get(path, params={"page": 100000}).json()
+            check(f"{path}?page=100000, the furthest allowed, is empty but keeps the total",
+                  far["items"] == [] and far["total"] == total and far["page"] == 100000,
+                  str(far)[:200])
+            none = client.get(path, params={"q": "zz-matches-nothing", "page": 3}).json()
+            check(f"{path} with nothing matching reports a total of 0 on any page",
+                  none["items"] == [] and none["total"] == 0, str(none)[:200])
 
         # --- vocabulary -------------------------------------------------
         clients = client.get("/projects/clients").json()

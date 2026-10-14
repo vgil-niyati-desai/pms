@@ -7,12 +7,15 @@ import FilterMenu from "../../components/FilterMenu";
 import FilterChips from "../../components/FilterChips";
 import SearchInput from "../../components/SearchInput";
 import SegmentedControl from "../../components/SegmentedControl";
+import StatusPill from "../../components/StatusPill";
 import Field from "../../components/Field";
 import FormRow from "../../components/FormRow";
 import CheckboxGroup from "../../components/CheckboxGroup";
 import Pagination from "../../components/Pagination";
+import useHandoffNotice from "../../hooks/useHandoffNotice";
 import useQueryParams from "../../hooks/useQueryParams";
 import useResource from "../../hooks/useResource";
+import usePageRecovery, { wholePage } from "../../hooks/usePageRecovery";
 import {
   listEmployees,
   listDesignations,
@@ -20,7 +23,7 @@ import {
   listCertificationNames,
 } from "../../api/employees";
 import { dash, formatExperience, formatTimestamp } from "../../lib/format";
-import { latestCvDate, certificationSummary } from "./employeeFields";
+import { latestCvDate, certificationSummary, certificationAlert } from "./employeeFields";
 import CertificationsView from "./CertificationsView";
 import { paths } from "../../app/routes";
 
@@ -47,12 +50,24 @@ const FILTER_SCHEMA = {
 export default function EmployeesListPage() {
   const navigate = useNavigate();
   const { values, setValues, clear } = useQueryParams(FILTER_SCHEMA);
+  // Handed over by the employee form after a delete: the record it confirms
+  // no longer exists, so this is the only screen left to say it on.
+  const [notice, setNotice] = useHandoffNotice();
 
+  const page = wholePage(values.page);
   const loadEmployees = useCallback(
-    () => listEmployees({ ...values, pageSize: PAGE_SIZE }),
-    [values],
+    () => listEmployees({ ...values, page, pageSize: PAGE_SIZE }),
+    [values, page],
   );
   const employees = useResource(loadEmployees, { initialData: { items: [], total: 0 } });
+  // The page the URL names, as one that exists; see usePageRecovery.
+  const movingPage = usePageRecovery({
+    rawPage: values.page,
+    page,
+    resource: employees,
+    pageSize: PAGE_SIZE,
+    setPage: (page) => setValues({ page }),
+  });
 
   const loadDesignations = useCallback(() => listDesignations(), []);
   const designations = useResource(loadDesignations, { initialData: [] });
@@ -163,7 +178,14 @@ export default function EmployeesListPage() {
     {
       key: "certifications",
       header: "Certifications",
-      render: (employee) => certificationSummary(employee),
+      render: (employee) => {
+        const alert = certificationAlert(employee);
+        return (
+          <>
+            {certificationSummary(employee)} {alert && <StatusPill value={alert} />}
+          </>
+        );
+      },
     },
     {
       key: "updated_at",
@@ -190,6 +212,20 @@ export default function EmployeesListPage() {
         <CertificationsView />
       ) : (
         <div className="list-layout">
+          {notice && (
+            <div className="alert alert-success notice-bar" role="status">
+              <span>{notice}</span>
+              <button
+                type="button"
+                className="notice-dismiss"
+                onClick={() => setNotice(null)}
+                aria-label="Dismiss this message"
+              >
+                &times;
+              </button>
+            </div>
+          )}
+
           <FilterBar
             showClear={filtering}
             onClear={clear}
@@ -257,6 +293,7 @@ export default function EmployeesListPage() {
                     id="filter-min-exp"
                     type="number"
                     min="0"
+                    max="100"
                     value={values.minExperience}
                     onChange={(e) => setFilter({ minExperience: e.target.value })}
                     placeholder="yrs"
@@ -267,6 +304,7 @@ export default function EmployeesListPage() {
                     id="filter-max-exp"
                     type="number"
                     min="0"
+                    max="100"
                     value={values.maxExperience}
                     onChange={(e) => setFilter({ maxExperience: e.target.value })}
                     placeholder="yrs"
@@ -278,17 +316,17 @@ export default function EmployeesListPage() {
 
           <section className="card list-panel">
             <div className="list-head">
-              <h2>Employees {!employees.loading && `(${total})`}</h2>
+              <h2>Employees {!employees.loading && !employees.error && `(${total})`}</h2>
             </div>
 
             <FilterChips chips={chips} />
 
-            {employees.error && <div className="alert alert-error">{employees.error}</div>}
-
             <DataTable
               columns={columns}
               rows={items}
-              loading={employees.loading}
+              loading={employees.loading || movingPage}
+              error={employees.error}
+              onRetry={employees.reload}
               onRowClick={(employee) => navigate(paths.employee(employee.id))}
               empty={
                 filtering ? (
@@ -314,7 +352,7 @@ export default function EmployeesListPage() {
             />
 
             <Pagination
-              page={values.page}
+              page={page}
               pageSize={PAGE_SIZE}
               total={total}
               onPageChange={(page) => setValues({ page })}

@@ -1,18 +1,26 @@
-import { useRef, useState } from "react";
-import Drawer from "../../components/Drawer";
+import { useCallback, useRef, useState } from "react";
+import DocumentUsageList from "../../components/DocumentUsageList";
+import Drawer, { DrawerCancelButton } from "../../components/Drawer";
 import Field from "../../components/Field";
+import useFieldErrors from "../../hooks/useFieldErrors";
 import FormRow from "../../components/FormRow";
-import FileUpload from "../../components/FileUpload";
+import FileUpload, { fileProblem } from "../../components/FileUpload";
 import DocumentFileSection from "../../components/DocumentFileSection";
 import ConfirmDelete from "../../components/ConfirmDelete";
 import SegmentedControl from "../../components/SegmentedControl";
 import AttachExistingDocument from "./AttachExistingDocument";
+import useRememberedAddedBy from "../../hooks/useRememberedAddedBy";
+import useUnsavedChanges from "../../hooks/useUnsavedChanges";
+import useResource from "../../hooks/useResource";
+import useDocumentUsage from "../../hooks/useDocumentUsage";
 import {
   createDocument,
   deleteDocument,
+  listDocumentCategories,
   updateDocument,
   updateDocumentFields,
 } from "../../api/documents";
+import { formatFileSize } from "../../lib/format";
 
 const EMPTY_FORM = {
   document_type: "",
@@ -65,17 +73,44 @@ export default function AttachedDocumentDrawer({
   // A document this tender lists but does not hold -- a project's, a
   // person's, another bid's. Removing it from here unlinks it; deleting it
   // would delete it from where it belongs.
-  const linkedOnly =
-    isEditing && Boolean(context.tenderId) && document.tender_id !== context.tenderId;
+  //
+  // A document that anything else also uses -- a CV, a certification, a
+  // cost receipt, another tender or project -- is not this owner's to
+  // delete either: deleting it would pull the file out from under all of
+  // them. So the owner asks the server who else uses it, and only offers
+  // Delete when nobody does; otherwise it offers to remove it from here.
+  // The same owner is named on the delete, so the server refuses (409) if
+  // that has changed since.
+  const owner = context.tenderId
+    ? { fromTender: context.tenderId }
+    : { fromProject: context.projectId };
+  const usage = useDocumentUsage(isEditing ? document.id : null, owner);
+  const otherUses = usage.otherUses;
+  // Until the answer is in, neither action is offered: showing Delete first
+  // would be the very risk the check is there to remove. If the check fails,
+  // Delete is offered and the server makes the same check again.
+  const usagePending = usage.pending;
+  const linkedOnly = context.tenderId
+    ? isEditing && (document.tender_id !== context.tenderId || otherUses.length > 0)
+    : otherUses.length > 0;
+  const ownerNoun = context.tenderId ? "tender" : "project";
   const [mode, setMode] = useState("upload");
   const attaching = canAttachExisting && mode === "attach";
 
+  // Whoever filed the last document. Part of what a new form starts as, so
+  // the baseline below counts it as a default rather than as a change -- an
+  // untouched form is still clean and closes without a question.
+  const [rememberedAddedBy, rememberAddedBy] = useRememberedAddedBy();
+
   const [form, setForm] = useState(() =>
-    document ? formFromDocument(document) : { ...EMPTY_FORM, document_type: presetType || "" },
+    document
+      ? formFromDocument(document)
+      : { ...EMPTY_FORM, document_type: presetType || "", submitted_by: rememberedAddedBy },
   );
   const [file, setFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const fieldErrors = useFieldErrors();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
@@ -85,6 +120,17 @@ export default function AttachedDocumentDrawer({
   // finishes the job rather than starting it again.
   const createdIdRef = useRef(null);
   const deletedRef = useRef(false);
+
+  // What closing this drawer would lose: the upload form's own fields and the
+  // file picked for it. `mode` is deliberately not in the snapshot -- moving
+  // between "Upload new" and "Attach existing" changes nothing that could be
+  // lost, while anything already typed into the upload form is still there
+  // and still worth keeping if the tab is switched back.
+  const { dirty } = useUnsavedChanges({ ...form, _file: file ? file.name : "" });
+
+  // Suggestions only: the field still accepts whatever is typed.
+  const loadCategories = useCallback(() => listDocumentCategories(), []);
+  const categories = useResource(loadCategories, { initialData: [] });
 
   // A document already in the log can carry a type this list does not offer --
   // imported entries do, e.g. "Agreement" or "Acceptance of Tender-cum-Order".
@@ -96,8 +142,22 @@ export default function AttachedDocumentDrawer({
       : documentTypes;
 
   function handleChange(e) {
-    const { name, value } = e.target;
+    const { id, name, value } = e.target;
     setForm((prev) => ({ ...prev, [name]: value }));
+    fieldErrors.clear(id);
+  }
+
+  function handleFileChange(e) {
+    const picked = e.target.files[0] || null;
+    const problem = fileProblem(picked);
+    if (problem) {
+      fieldErrors.set("doc_file", problem);
+      e.target.value = "";
+      setFile(null);
+      return;
+    }
+    fieldErrors.clear("doc_file");
+    setFile(picked);
   }
 
   function buildFormData() {
@@ -124,10 +184,11 @@ export default function AttachedDocumentDrawer({
     e.preventDefault();
     setError(null);
 
-    if (!form.document_type || !form.category.trim() || !form.submitted_by.trim()) {
-      setError("Please fill in Document type, Category, and Added by.");
-      return;
-    }
+    const problems = {};
+    if (!form.document_type) problems.doc_type = "Please choose a Document type.";
+    if (!form.category.trim()) problems.doc_category = "Please fill in Category.";
+    if (!form.submitted_by.trim()) problems.doc_submitted_by = "Please fill in Added by.";
+    if (fieldErrors.report(problems)) return;
 
     setSubmitting(true);
     try {
@@ -156,7 +217,12 @@ export default function AttachedDocumentDrawer({
         createdIdRef.current = saved.id;
         await onLink(saved.id);
       }
-      onSaved();
+      // Only a new document: an edit is usually a correction to what somebody
+      // else filed, and would make them the default for everything after.
+      if (!isEditing) rememberAddedBy(form.submitted_by);
+      // `reveal` only for a create: an edit does not add a row the current
+      // type filter could be hiding, so the owner leaves that filter alone.
+      onSaved({ message: isEditing ? "Document saved." : "Document added.", reveal: !isEditing });
     } catch (err) {
       setError(err.message || "Could not save this document.");
       setSubmitting(false);
@@ -167,7 +233,14 @@ export default function AttachedDocumentDrawer({
   // here it is the whole operation, because the record already exists.
   async function handleAttachExisting(documentId) {
     await onLink(documentId);
-    onSaved();
+    // An existing document newly on this list is the same "just appeared"
+    // case a new upload is -- see the comment in handleSubmit. The wording
+    // follows AttachExistingDocument's own "Attach"/"Link" distinction: a
+    // tender links to a document it does not claim, same as "Link" there.
+    onSaved({
+      message: context.tenderId ? "Document linked." : "Document attached.",
+      reveal: true,
+    });
   }
 
   async function handleRemoveLink() {
@@ -177,7 +250,7 @@ export default function AttachedDocumentDrawer({
       await onUnlink(document.id);
       onSaved();
     } catch (err) {
-      setDeleteError(err.message || "Could not remove this document from the tender.");
+      setDeleteError(err.message || `Could not remove this document from the ${ownerNoun}.`);
       setDeleting(false);
     }
   }
@@ -187,7 +260,9 @@ export default function AttachedDocumentDrawer({
     setDeleteError(null);
     try {
       if (!deletedRef.current) {
-        await deleteDocument(document.id);
+        // Naming the owner asks the server to refuse if anything else has
+        // started using the document since the drawer opened.
+        await deleteDocument(document.id, owner);
         deletedRef.current = true;
       }
       // Detaching is the second call. If only that failed, a retry must not
@@ -197,6 +272,9 @@ export default function AttachedDocumentDrawer({
       onSaved();
     } catch (err) {
       setDeleteError(err.message || "Could not delete this document.");
+      // Refused because something else uses it: look again, which turns the
+      // dialog into the remove-from-project one with the reason shown.
+      if (err.status === 409) usage.reload();
       setDeleting(false);
     }
   }
@@ -207,6 +285,7 @@ export default function AttachedDocumentDrawer({
         title={isEditing ? "Edit document" : "Add document"}
         onClose={onClose}
         dismissable={!submitting && !deleting}
+        dirty={dirty}
       >
         {canAttachExisting && (
           <SegmentedControl
@@ -230,6 +309,9 @@ export default function AttachedDocumentDrawer({
           />
         ) : (
           <form onSubmit={handleSubmit}>
+            {fieldErrors.summary && (
+              <div className="alert alert-error">{fieldErrors.summary}</div>
+            )}
             {error && <div className="alert alert-error">{error}</div>}
 
             <p className="muted hint drawer-context">
@@ -237,7 +319,12 @@ export default function AttachedDocumentDrawer({
             </p>
 
             <FormRow>
-              <Field label="Document type *" htmlFor="doc_type">
+              <Field
+                label="Document type *"
+                htmlFor="doc_type"
+                required
+                error={fieldErrors.errors.doc_type}
+              >
                 <select
                   id="doc_type"
                   name="document_type"
@@ -263,15 +350,33 @@ export default function AttachedDocumentDrawer({
               </Field>
             </FormRow>
 
-            <Field label="Category *" htmlFor="doc_category">
+            {/* Offered from what the log already holds, and still free text
+                for a heading nobody has used yet. This is the form reached
+                from a project's own "+ Add document", so it is where most
+                categories are written -- and where the same one being typed a
+                second way starts the drift the log's exact-match filter then
+                cannot see past. */}
+            <Field
+              label="Category *"
+              htmlFor="doc_category"
+              hint="Pick one already in use where it fits, or type a new one."
+              required
+              error={fieldErrors.errors.doc_category}
+            >
               <input
                 id="doc_category"
                 name="category"
                 type="text"
+                list="doc_category_suggestions"
                 value={form.category}
                 onChange={handleChange}
                 placeholder="e.g. ERP Implementation & Operational Experience"
               />
+              <datalist id="doc_category_suggestions">
+                {categories.data.map((category) => (
+                  <option key={category} value={category} />
+                ))}
+              </datalist>
             </Field>
 
             <FormRow>
@@ -284,7 +389,12 @@ export default function AttachedDocumentDrawer({
                   onChange={handleChange}
                 />
               </Field>
-              <Field label="Added by *" htmlFor="doc_submitted_by">
+              <Field
+                label="Added by *"
+                htmlFor="doc_submitted_by"
+                required
+                error={fieldErrors.errors.doc_submitted_by}
+              >
                 <input
                   id="doc_submitted_by"
                   name="submitted_by"
@@ -301,13 +411,16 @@ export default function AttachedDocumentDrawer({
               name="document_file"
               label={isEditing ? "Replace file (optional)" : "Upload file (PDF, PNG, or JPG)"}
               hint={
-                isEditing
-                  ? document.file_name
-                    ? `Current file: ${document.file_name}. Leave empty to keep it.`
-                    : "No file attached yet."
-                  : null
+                file
+                  ? `Selected: ${file.name} (${formatFileSize(file.size)})`
+                  : isEditing
+                    ? document.file_name
+                      ? `Current file: ${document.file_name}. Leave empty to keep it.`
+                      : "No file attached yet."
+                    : null
               }
-              onChange={(e) => setFile(e.target.files[0] || null)}
+              error={fieldErrors.errors.doc_file}
+              onChange={handleFileChange}
               ref={fileInputRef}
             />
 
@@ -325,22 +438,20 @@ export default function AttachedDocumentDrawer({
               <button type="submit" className="btn btn-primary" disabled={submitting || deleting}>
                 {submitting ? "Saving..." : isEditing ? "Save changes" : "Add document"}
               </button>
-              <button
-                type="button"
-                className="btn"
-                onClick={onClose}
-                disabled={submitting || deleting}
-              >
-                Cancel
-              </button>
+              {/* Asks first when something is unsaved, like every other way out. */}
+              <DrawerCancelButton disabled={submitting || deleting} />
               {isEditing && (
                 <button
                   type="button"
                   className="btn btn-danger form-actions-end"
                   onClick={() => setConfirmingDelete(true)}
-                  disabled={submitting || deleting}
+                  disabled={submitting || deleting || usagePending}
                 >
-                  {linkedOnly ? "Remove from this tender" : "Delete document"}
+                  {usagePending
+                    ? "Checking where it is used..."
+                    : linkedOnly
+                      ? `Remove from this ${ownerNoun}`
+                      : "Delete document"}
                 </button>
               )}
             </div>
@@ -357,52 +468,62 @@ export default function AttachedDocumentDrawer({
       </Drawer>
 
       {confirmingDelete && linkedOnly && (
-        <ConfirmDelete
-          title="Remove this document from the tender?"
-          confirmLabel="Remove from tender"
-          busyLabel="Removing..."
-          busy={deleting}
-          error={deleteError}
-          onConfirm={handleRemoveLink}
-          onCancel={() => {
-            setConfirmingDelete(false);
-            setDeleteError(null);
-          }}
-        >
-          <p className="muted">
-            {document.document_type}
-            {document.reference_number ? ` — ${document.reference_number}` : ""}
-          </p>
-          <p className="muted">
-            The tender stops listing it. The document itself, its file and wherever else it
-            belongs are not changed.
-          </p>
-        </ConfirmDelete>
+        <div className="drawer-confirm-layer">
+          <ConfirmDelete
+            title={`Remove this document from the ${ownerNoun}?`}
+            confirmLabel={`Remove from ${ownerNoun}`}
+            busyLabel="Removing..."
+            busy={deleting}
+            error={deleteError}
+            onConfirm={handleRemoveLink}
+            onCancel={() => {
+              setConfirmingDelete(false);
+              setDeleteError(null);
+            }}
+          >
+            <p className="muted">
+              {document.document_type}
+              {document.reference_number ? ` — ${document.reference_number}` : ""}
+            </p>
+            {otherUses.length > 0 && (
+              <>
+                <p className="muted">It cannot be deleted from here because it is also used by:</p>
+                <DocumentUsageList uses={otherUses} />
+              </>
+            )}
+            <p className="muted">
+              The {ownerNoun} stops listing it. The document itself, its file and wherever else it
+              belongs are not changed.
+            </p>
+          </ConfirmDelete>
+        </div>
       )}
 
       {confirmingDelete && !linkedOnly && (
-        <ConfirmDelete
-          title="Delete this document?"
-          confirmLabel="Delete document"
-          busy={deleting}
-          error={deleteError}
-          onConfirm={handleDelete}
-          onCancel={() => {
-            setConfirmingDelete(false);
-            setDeleteError(null);
-          }}
-        >
-          <p className="muted">
-            {document.document_type}
-            {document.reference_number ? ` — ${document.reference_number}` : ""}
-          </p>
-          <p className="muted">
-            {document.file_name
-              ? `The record and its uploaded file (${document.file_name}) will be permanently removed.`
-              : "The record will be permanently removed."}{" "}
-            This cannot be undone.
-          </p>
-        </ConfirmDelete>
+        <div className="drawer-confirm-layer">
+          <ConfirmDelete
+            title="Delete this document?"
+            confirmLabel="Delete document"
+            busy={deleting}
+            error={deleteError}
+            onConfirm={handleDelete}
+            onCancel={() => {
+              setConfirmingDelete(false);
+              setDeleteError(null);
+            }}
+          >
+            <p className="muted">
+              {document.document_type}
+              {document.reference_number ? ` — ${document.reference_number}` : ""}
+            </p>
+            <p className="muted">
+              {document.file_name
+                ? `The record and its uploaded file (${document.file_name}) will be permanently removed.`
+                : "The record will be permanently removed."}{" "}
+              This cannot be undone.
+            </p>
+          </ConfirmDelete>
+        </div>
       )}
     </>
   );

@@ -26,9 +26,29 @@ export async function errorMessage(res, fallback) {
   return detail ? JSON.stringify(detail) : fallback;
 }
 
+/** What a request that never got an answer says, in place of the browser's
+ *  bare "Failed to fetch". */
+export const UNREACHABLE_MESSAGE =
+  "Could not reach the server. Check that the backend is running, then try again.";
+
+/**
+ * fetch(), with a request that never reached the server -- backend stopped,
+ * network down -- reported as a sentence rather than the browser's
+ * "Failed to fetch". fetch() rejects only for that (a TypeError); every
+ * response, error statuses included, still comes back for the caller to read.
+ */
+export async function apiFetch(url, options) {
+  try {
+    return await fetch(url, options);
+  } catch (err) {
+    if (err instanceof TypeError) throw new Error(UNREACHABLE_MESSAGE, { cause: err });
+    throw err;
+  }
+}
+
 /** GET/POST/PUT returning JSON, or throw with the backend's own message. */
 export async function requestJson(path, { fallback, ...options } = {}) {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
+  const res = await apiFetch(`${API_BASE_URL}${path}`, {
     ...options,
     headers: options.body ? { "Content-Type": "application/json", ...options.headers } : options.headers,
   });
@@ -38,7 +58,7 @@ export async function requestJson(path, { fallback, ...options } = {}) {
 
 /** A request with nothing to return, e.g. a 204 from DELETE. */
 export async function requestNoContent(path, { fallback, ...options } = {}) {
-  const res = await fetch(`${API_BASE_URL}${path}`, options);
+  const res = await apiFetch(`${API_BASE_URL}${path}`, options);
   if (!res.ok) throw new Error(await errorMessage(res, fallback));
 }
 

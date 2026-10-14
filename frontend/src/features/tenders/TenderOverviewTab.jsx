@@ -1,5 +1,5 @@
 import { sumAmounts, dash, formatAmount, formatTimestamp } from "../../lib/format";
-import { criteriaCountLabel } from "./criteriaFields";
+import { complianceSummary, criteriaCountLabel } from "./criteriaFields";
 
 /**
  * The tender's own fields, led by a readiness summary: what the tender asks
@@ -11,7 +11,7 @@ export default function TenderOverviewTab({ tender, documentCount, citedProjectC
 
   const fields = [
     ["Issuing authority", tender.issuing_authority],
-    ["Reference number", dash(tender.reference_number)],
+    ["Reference no.", dash(tender.reference_number)],
     ["Tender type", dash(tender.tender_type)],
     ["Estimated value", formatAmount(tender.estimated_value)],
     ["EMD required", formatAmount(tender.emd_amount)],
@@ -23,8 +23,13 @@ export default function TenderOverviewTab({ tender, documentCount, citedProjectC
     ["Last updated", formatTimestamp(tender.updated_at)],
   ];
 
+  // Only where there is something to be compliant with. Desirable-only
+  // criteria produce nothing, since the figure is about what must be met.
+  const compliance = complianceSummary(tender.criteria);
+
   const summary = [
     ["Criteria", criteriaCountLabel(tender.criteria)],
+    ...(compliance ? [["Compliance", compliance]] : []),
     ["Cost recorded", formatAmount(recordedCost)],
     ["Cost items", tender.cost_items.length],
     ["Certificates", tender.certificates.length],

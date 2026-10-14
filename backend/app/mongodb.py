@@ -199,6 +199,11 @@ def ensure_indexes(collection: Optional[Collection] = None) -> None:
     # Which documents belong to one tender. The same index migration 0004
     # creates, by the same name.
     coll.create_index([("tender_id", ASCENDING)], name="ix_documents_tender_id")
+    # Which entries are redacted copies of one original. The same index
+    # migration 0006 creates, by the same name.
+    coll.create_index(
+        [("redacted_from_id", ASCENDING)], name="ix_documents_redacted_from_id"
+    )
 
 
 def ensure_project_indexes(collection: Optional[Collection] = None) -> None:

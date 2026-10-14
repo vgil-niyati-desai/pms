@@ -50,6 +50,10 @@ DATE_FIELDS = {"created_at", "updated_at"}
 # A page size ceiling, so a hand-edited URL cannot ask for the whole
 # collection in one response.
 MAX_PAGE_SIZE = 200
+# The furthest page a list may ask for. Far past any real list, and far short
+# of the skip MongoDB can no longer represent -- which a page like 10**20
+# reached, as a 500. Beyond the last page is still a normal, empty page.
+MAX_PAGE = 100_000
 
 
 def _now_utc_ms() -> datetime:
@@ -178,6 +182,39 @@ def _owner_project(
     return projects.find_one({"_id": oid}, {"_id": 1, "title": 1})
 
 
+def _number_key(field: str) -> Dict[str, Any]:
+    """A money field held as free text, as a double — or null where it does
+    not parse. Commas and spaces are stripped first, so "5,00,000" reads as
+    500000, something `Number("5,00,000")` in the browser store this replaced
+    could not do.
+
+    Used by both the contract_value sort and the contract_value range filter,
+    so the two can never disagree about what a stored value is worth. The
+    tenders list has the same helper for its own money fields; neither router
+    can import the other, so the two definitions must stay in step.
+    """
+    digits = {
+        "$replaceAll": {
+            "input": {"$toString": {"$ifNull": [f"${field}", ""]}},
+            "find": ",",
+            "replacement": "",
+        }
+    }
+    digits = {"$replaceAll": {"input": digits, "find": " ", "replacement": ""}}
+    # onError/onNull leave anything unparseable as null.
+    return {"$convert": {"input": digits, "to": "double", "onError": None, "onNull": None}}
+
+
+def _parse_amount(value: Optional[str]) -> Optional[float]:
+    """A querystring bound as a number, or None when absent or unusable."""
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except ValueError:
+        return None
+
+
 def _exact_ci(value: str) -> re.Pattern:
     """Anchored case-insensitive match for one whole value.
 
@@ -218,6 +255,8 @@ def _build_query(
     tags: List[str],
     tag_mode: str,
     has: List[str],
+    end_date_from: Optional[str] = None,
+    end_date_to: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The filter half of the list endpoint."""
     query: Dict[str, Any] = {}
@@ -251,6 +290,23 @@ def _build_query(
             clauses.extend({"tags": pattern} for pattern in patterns)
         else:
             clauses.append({"tags": {"$in": patterns}})
+
+    # When the work finished. Dates are ISO YYYY-MM-DD strings, which compare
+    # correctly as text -- the same arrangement the tender deadline window
+    # relies on. This is the bound a tender's "completed within the last N
+    # years" clause is really asking about.
+    window: Dict[str, Any] = {}
+    if end_date_from and end_date_from.strip():
+        window["$gte"] = end_date_from.strip()
+    if end_date_to and end_date_to.strip():
+        window["$lte"] = end_date_to.strip()
+        # An empty string is "less than" any date, so a to-only window would
+        # otherwise sweep in every project with no end date recorded. It must
+        # not: no end date cannot fall inside a window. $gt "" shuts that door
+        # (a missing or null field already fails a string range on its own).
+        window.setdefault("$gt", "")
+    if window:
+        query["end_date"] = window
 
     clauses.extend(_held_document_clauses(documents, has))
 
@@ -300,23 +356,8 @@ def _sort_stages(sort: str) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     spec: Dict[str, int] = {"_blank": 1}
 
     if key == "contract_value":
-        digits = {"$replaceAll": {"input": {"$toString": value}, "find": ",", "replacement": ""}}
-        digits = {"$replaceAll": {"input": digits, "find": " ", "replacement": ""}}
-        # onError/onNull leave anything unparseable as null.
-        stages.append(
-            {
-                "$addFields": {
-                    "_number": {
-                        "$convert": {
-                            "input": digits,
-                            "to": "double",
-                            "onError": None,
-                            "onNull": None,
-                        }
-                    }
-                }
-            }
-        )
+        # The same reading of a stored value the range filter uses.
+        stages.append({"$addFields": {"_number": _number_key(key)}})
         # A separate stage, because fields added in one $addFields cannot
         # reference each other. Values that did not parse sort after the ones
         # that did, in both directions, the same way blanks do.
@@ -368,8 +409,12 @@ def list_projects(
     tags: List[str] = Query(default=[]),
     tag_mode: str = "any",
     has: List[str] = Query(default=[]),
+    end_date_from: Optional[str] = None,
+    end_date_to: Optional[str] = None,
+    min_value: Optional[str] = None,
+    max_value: Optional[str] = None,
     sort: str = DEFAULT_SORT,
-    page: int = Query(default=1, ge=1),
+    page: int = Query(default=1, ge=1, le=MAX_PAGE),
     page_size: int = Query(default=10, ge=1, le=MAX_PAGE_SIZE),
     projects: Collection = Depends(get_project_records),
     documents: Collection = Depends(get_documents),
@@ -377,12 +422,39 @@ def list_projects(
     """One page of projects, filtered and sorted.
 
     The count is taken against the same filter as the page, so the pager and
-    the rows can never disagree about how many results there are.
+    the rows can never disagree about how many results there are. That is why
+    it is counted through the pipeline rather than with count_documents: the
+    contract_value range is a stage, not a query clause, and a plain count
+    would not see it.
     """
-    query = _build_query(documents, q, client, status, tags, tag_mode, has)
-    key_stages, sort_spec = _sort_stages(sort)
+    query = _build_query(
+        documents, q, client, status, tags, tag_mode, has, end_date_from, end_date_to
+    )
 
-    pipeline: List[Dict[str, Any]] = [{"$match": query}, *key_stages]
+    # Everything that decides *which* projects, before anything that decides
+    # their order. The count and the page are taken from this same prefix.
+    narrowing: List[Dict[str, Any]] = [{"$match": query}]
+
+    minimum = _parse_amount(min_value)
+    maximum = _parse_amount(max_value)
+    if minimum is not None or maximum is not None:
+        # Convert-then-match, as the tender value range does: contract_value
+        # is free text, so it is read as a number first, and one that does not
+        # parse becomes null. null never satisfies a numeric range, so a
+        # project with no value recorded cannot fall inside one.
+        bounds: Dict[str, Any] = {}
+        if minimum is not None:
+            bounds["$gte"] = minimum
+        if maximum is not None:
+            bounds["$lte"] = maximum
+        narrowing.append({"$addFields": {"_value": _number_key("contract_value")}})
+        narrowing.append({"$match": {"_value": bounds}})
+
+    totals = list(projects.aggregate(narrowing + [{"$count": "n"}]))
+    total = totals[0]["n"] if totals else 0
+
+    key_stages, sort_spec = _sort_stages(sort)
+    pipeline: List[Dict[str, Any]] = [*narrowing, *key_stages]
     pipeline.append({"$sort": sort_spec})
     pipeline.append({"$skip": (page - 1) * page_size})
     pipeline.append({"$limit": page_size})
@@ -397,7 +469,7 @@ def list_projects(
     items = [_serialise(doc, types.get(str(doc["_id"]))) for doc in records]
     return {
         "items": items,
-        "total": projects.count_documents(query),
+        "total": total,
         "page": page,
         "page_size": page_size,
     }
@@ -438,6 +510,59 @@ def list_project_documents(
     }
     cursor = documents.find(query).sort([("created_at", DESCENDING), ("_id", DESCENDING)])
     return [serialise_document(doc) for doc in cursor]
+
+
+# The fields the project screen needs about a tender that cites it, and the
+# only ones read: a projection, so following the citation back does not drag
+# every bid's criteria and cost items along with it.
+_CITATION_FIELDS = {
+    "title": 1,
+    "issuing_authority": 1,
+    "reference_number": 1,
+    "status": 1,
+    "submission_deadline": 1,
+}
+
+
+@router.get("/{project_id}/tenders", response_model=List[schemas.ProjectCitationOut])
+def list_project_tenders(
+    project_id: str,
+    projects: Collection = Depends(get_project_records),
+    tenders: Collection = Depends(get_tender_records),
+):
+    """The tenders that cite this project as past experience.
+
+    The same relationship the Cited projects tab reads, followed the other
+    way. It lives on `cited_project_ids` on the tender, so this is one query
+    against the multikey index that already exists for it (ix_tenders_cited_
+    project_ids) -- the index `delete_project` below already relies on to
+    clear a deleted project's citations. No second copy of the relationship
+    is kept, and nothing here writes.
+
+    Ordered by deadline, newest first, so the most recent bid a project was
+    put forward for reads first, with `_id` breaking ties as everywhere else.
+    A tender with no deadline recorded sorts last rather than being dropped.
+
+    Citing does not change the project, so this says nothing about whether
+    the project is any good as evidence -- only where it has been used.
+    """
+    if not projects.count_documents({"_id": _object_id(project_id)}, limit=1):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    cursor = tenders.find(
+        {"cited_project_ids": project_id}, _CITATION_FIELDS
+    ).sort([("submission_deadline", DESCENDING), ("_id", DESCENDING)])
+    return [
+        {
+            "id": str(tender["_id"]),
+            "title": tender.get("title") or "Untitled tender",
+            "issuing_authority": tender.get("issuing_authority"),
+            "reference_number": tender.get("reference_number"),
+            "status": tender.get("status"),
+            "submission_deadline": tender.get("submission_deadline"),
+        }
+        for tender in cursor
+    ]
 
 
 @router.get("/{project_id}", response_model=schemas.ProjectOut)

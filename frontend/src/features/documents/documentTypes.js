@@ -35,3 +35,20 @@ export function documentTypeOptions(storedTypes = [], current = "") {
   }
   return options;
 }
+
+/**
+ * The options for a category picker: every category the log already holds,
+ * plus `current` if it is not among them.
+ *
+ * No known list to lead with, unlike the types above -- a category is free
+ * text, so the vocabulary is only ever what has been written. The `current`
+ * rule is the same one and matters more here: a filter carrying an older
+ * spelling, or one arriving in a link, has to appear as the filter that is
+ * applied. Dropping it would leave the box reading as unset while the list
+ * below stayed narrowed by it.
+ */
+export function documentCategoryOptions(storedCategories = [], current = "") {
+  const options = [...storedCategories];
+  if (current && !options.includes(current)) options.push(current);
+  return options;
+}

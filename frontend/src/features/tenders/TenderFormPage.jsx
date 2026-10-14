@@ -2,9 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import Field from "../../components/Field";
 import FormRow from "../../components/FormRow";
+import FormSkeleton from "../../components/FormSkeleton";
 import TagInput from "../../components/TagInput";
 import ConfirmDelete from "../../components/ConfirmDelete";
+import ConfirmDiscard from "../../components/ConfirmDiscard";
 import useResource from "../../hooks/useResource";
+import useUnsavedChanges from "../../hooks/useUnsavedChanges";
+import useFieldErrors from "../../hooks/useFieldErrors";
 import {
   EMPTY_TENDER,
   TENDER_STATUSES,
@@ -34,6 +38,7 @@ export default function TenderFormPage() {
   const [form, setForm] = useState(EMPTY_TENDER);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const fieldErrors = useFieldErrors();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
@@ -46,6 +51,28 @@ export default function TenderFormPage() {
 
   const loadTags = useCallback(() => listTags(), []);
   const tags = useResource(loadTags, { initialData: [] });
+  // Where Cancel goes, and whether it should ask first.
+  const cancelTo = isEditing ? paths.tender(tenderId) : paths.tenders();
+  const [confirmingLeave, setConfirmingLeave] = useState(false);
+  // The baseline is derived from the record rather than captured: the effect
+  // below loads it a render late, so a captured one would be the blank form
+  // and the loaded tender would read as somebody's unsaved change. Before it
+  // arrives -- and on a new tender -- the blank form is its own baseline.
+  // `release` comes before every navigation this page makes on purpose, so
+  // the app-wide guard does not stop the page's own save, delete or discard.
+  const { dirty, release } = useUnsavedChanges(
+    form,
+    existing.data ? formFromTender(existing.data) : EMPTY_TENDER,
+  );
+
+  function requestCancel() {
+    if (dirty) {
+      setConfirmingLeave(true);
+      return;
+    }
+    navigate(cancelTo);
+  }
+
 
   useEffect(() => {
     if (existing.data) setForm(formFromTender(existing.data));
@@ -54,29 +81,41 @@ export default function TenderFormPage() {
   function handleChange(e) {
     const { name, value } = e.target;
     setForm((prev) => ({ ...prev, [name]: value }));
+    fieldErrors.clear(name);
+    // The date rule is about the pair, so editing either side settles it.
+    if (name === "published_date") fieldErrors.clear("submission_deadline");
   }
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError(null);
 
-    if (!form.title.trim() || !form.issuing_authority.trim() || !form.status) {
-      setError("Please fill in Tender title, Issuing authority, and Status.");
-      return;
+    const problems = {};
+    if (!form.title.trim()) problems.title = "Please fill in Tender title.";
+    if (!form.issuing_authority.trim()) {
+      problems.issuing_authority = "Please fill in Issuing authority.";
     }
+    if (!form.status) problems.status = "Please choose a Status.";
     if (
       form.published_date &&
       form.submission_deadline &&
       form.submission_deadline < form.published_date
     ) {
-      setError("The submission deadline cannot be before the published date.");
-      return;
+      problems.submission_deadline = "The submission deadline cannot be before the published date.";
     }
+    if (fieldErrors.report(problems)) return;
 
     setSubmitting(true);
     try {
       const saved = isEditing ? await updateTender(tenderId, form) : await createTender(form);
-      navigate(paths.tender(saved.id), { replace: true });
+      // Confirmed on the record screen, since that is where this lands.
+      release();
+      navigate(paths.tender(saved.id), {
+        replace: true,
+        state: {
+          notice: isEditing ? "Tender saved." : "Tender created.",
+        },
+      });
     } catch (err) {
       setError(err.message || "Could not save this tender.");
       setSubmitting(false);
@@ -88,7 +127,14 @@ export default function TenderFormPage() {
     setDeleteError(null);
     try {
       await deleteTender(tenderId);
-      navigate(paths.tenders(), { replace: true });
+      // The record is gone, so the confirmation belongs on the list.
+      release();
+      navigate(paths.tenders(), {
+        replace: true,
+        state: {
+          notice: "Tender deleted. Files already uploaded stay in the document log.",
+        },
+      });
     } catch (err) {
       setDeleteError(err.message || "Could not delete this tender.");
       setDeleting(false);
@@ -96,7 +142,11 @@ export default function TenderFormPage() {
   }
 
   // Only an edit has something to wait for; the create form is ready at once.
-  if (isEditing && existing.loading) return <p className="muted">Loading...</p>;
+  // Title/authority, reference/type, value/EMD, fee/status, published/deadline
+  // -- then submission mode, the tag input and notes below it.
+  if (isEditing && existing.loading) {
+    return <FormSkeleton rows={5} wide={["control", "control", "textarea"]} />;
+  }
   if (existing.error) {
     return (
       <div className="card">
@@ -114,13 +164,19 @@ export default function TenderFormPage() {
       <form className="card form" onSubmit={handleSubmit}>
         <h2>{isEditing ? "Edit tender" : "New tender"}</h2>
 
+        {fieldErrors.summary && <div className="alert alert-error">{fieldErrors.summary}</div>}
         {error && <div className="alert alert-error">{error}</div>}
 
         <FormRow>
-          <Field label="Tender title *" htmlFor="title">
+          <Field label="Tender title *" htmlFor="title" required error={fieldErrors.errors.title}>
             <input id="title" name="title" type="text" value={form.title} onChange={handleChange} />
           </Field>
-          <Field label="Issuing authority *" htmlFor="issuing_authority">
+          <Field
+            label="Issuing authority *"
+            htmlFor="issuing_authority"
+            required
+            error={fieldErrors.errors.issuing_authority}
+          >
             <input
               id="issuing_authority"
               name="issuing_authority"
@@ -132,7 +188,7 @@ export default function TenderFormPage() {
         </FormRow>
 
         <FormRow>
-          <Field label="Tender reference no." htmlFor="reference_number">
+          <Field label="Reference number" htmlFor="reference_number">
             <input
               id="reference_number"
               name="reference_number"
@@ -165,6 +221,7 @@ export default function TenderFormPage() {
               name="estimated_value"
               type="number"
               min="0"
+              step="any"
               value={form.estimated_value}
               onChange={handleChange}
             />
@@ -179,6 +236,7 @@ export default function TenderFormPage() {
               name="emd_amount"
               type="number"
               min="0"
+              step="any"
               value={form.emd_amount}
               onChange={handleChange}
             />
@@ -196,11 +254,12 @@ export default function TenderFormPage() {
               name="tender_fee"
               type="number"
               min="0"
+              step="any"
               value={form.tender_fee}
               onChange={handleChange}
             />
           </Field>
-          <Field label="Status *" htmlFor="status">
+          <Field label="Status *" htmlFor="status" required error={fieldErrors.errors.status}>
             <select id="status" name="status" value={form.status} onChange={handleChange}>
               <option value="">Select status</option>
               {TENDER_STATUSES.map((status) => (
@@ -222,7 +281,11 @@ export default function TenderFormPage() {
               onChange={handleChange}
             />
           </Field>
-          <Field label="Submission deadline" htmlFor="submission_deadline">
+          <Field
+            label="Submission deadline"
+            htmlFor="submission_deadline"
+            error={fieldErrors.errors.submission_deadline}
+          >
             <input
               id="submission_deadline"
               name="submission_deadline"
@@ -264,9 +327,16 @@ export default function TenderFormPage() {
           <button type="submit" className="btn btn-primary" disabled={submitting}>
             {submitting ? "Saving..." : isEditing ? "Save changes" : "Create tender"}
           </button>
-          <Link className="btn" to={isEditing ? paths.tender(tenderId) : paths.tenders()}>
+          {/* A button, not a link: leaving with something unsaved asks first,
+              and a Link would already be gone by the time it could. */}
+          <button
+            type="button"
+            className="btn"
+            onClick={requestCancel}
+            disabled={submitting}
+          >
             Cancel
-          </Link>
+          </button>
           {isEditing && (
             <button
               type="button"
@@ -279,6 +349,18 @@ export default function TenderFormPage() {
           )}
         </div>
       </form>
+
+      {confirmingLeave && (
+        <ConfirmDiscard
+          body="This tender has changes that have not been saved. Leaving now loses them."
+          onKeep={() => setConfirmingLeave(false)}
+          onDiscard={() => {
+            setConfirmingLeave(false);
+            release();
+            navigate(cancelTo);
+          }}
+        />
+      )}
 
       {confirmingDelete && (
         <ConfirmDelete

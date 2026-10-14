@@ -21,6 +21,7 @@ from . import (
     m0003_document_employee_id,
     m0004_document_tender_id,
     m0005_tender_cited_project_ids,
+    m0006_document_redacted_from_id,
 )
 
 MIGRATIONS = [
@@ -29,6 +30,7 @@ MIGRATIONS = [
     m0003_document_employee_id,
     m0004_document_tender_id,
     m0005_tender_cited_project_ids,
+    m0006_document_redacted_from_id,
 ]
 
 # The collection holding one record per applied migration. Deliberately its

@@ -11,6 +11,7 @@ import FileViewLink from "../../components/FileViewLink";
 import Pagination from "../../components/Pagination";
 import useQueryParams from "../../hooks/useQueryParams";
 import useResource from "../../hooks/useResource";
+import usePageRecovery, { wholePage } from "../../hooks/usePageRecovery";
 import {
   listCertifications,
   listCertificationNames,
@@ -43,6 +44,7 @@ export default function CertificationsView() {
   const navigate = useNavigate();
   const { values, setValues, clear } = useQueryParams(FILTER_SCHEMA);
 
+  const page = wholePage(values.certPage);
   const loadCertifications = useCallback(
     () =>
       listCertifications({
@@ -51,12 +53,20 @@ export default function CertificationsView() {
         issuingBody: values.issuingBody,
         status: values.certStatus,
         sort: values.certSort,
-        page: values.certPage,
+        page,
         pageSize: PAGE_SIZE,
       }),
-    [values],
+    [values, page],
   );
   const certifications = useResource(loadCertifications, { initialData: { items: [], total: 0 } });
+  // The page the URL names, as one that exists; see usePageRecovery.
+  const movingPage = usePageRecovery({
+    rawPage: values.certPage,
+    page,
+    resource: certifications,
+    pageSize: PAGE_SIZE,
+    setPage: (certPage) => setValues({ certPage }),
+  });
 
   const loadNames = useCallback(() => listCertificationNames(), []);
   const names = useResource(loadNames, { initialData: [] });
@@ -218,17 +228,17 @@ export default function CertificationsView() {
 
       <section className="card list-panel">
         <div className="list-head">
-          <h2>Certifications {!certifications.loading && `(${total})`}</h2>
+          <h2>Certifications {!certifications.loading && !certifications.error && `(${total})`}</h2>
         </div>
 
         <FilterChips chips={chips} />
 
-        {certifications.error && <div className="alert alert-error">{certifications.error}</div>}
-
         <DataTable
           columns={columns}
           rows={items}
-          loading={certifications.loading}
+          loading={certifications.loading || movingPage}
+          error={certifications.error}
+          onRetry={certifications.reload}
           onRowClick={(row) => navigate(paths.employee(row.employee_id))}
           empty={
             filtering ? (
@@ -247,7 +257,7 @@ export default function CertificationsView() {
         />
 
         <Pagination
-          page={values.certPage}
+          page={page}
           pageSize={PAGE_SIZE}
           total={total}
           onPageChange={(certPage) => setValues({ certPage })}

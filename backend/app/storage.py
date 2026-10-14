@@ -17,6 +17,13 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
 
+# The largest file an upload may be. Generous for a scanned tender PDF -- the
+# largest stored so far is under 3 MB -- while refusing something that is
+# plainly not a document. Must match MAX_UPLOAD_BYTES in the frontend's
+# components/FileUpload.jsx, which checks it before sending.
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_LABEL = "20 MB"
+
 
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -60,6 +67,12 @@ def write_upload(contents: bytes, original_filename: str) -> str:
     """Write uploaded bytes under a fresh UUID name and return that name."""
     ext = original_filename.rsplit(".", 1)[1].lower()
     stored_file_name = f"{uuid.uuid4().hex}.{ext}"
-    with open(upload_path(stored_file_name), "wb") as f:
-        f.write(contents)
+    try:
+        with open(upload_path(stored_file_name), "wb") as f:
+            f.write(contents)
+    except Exception:
+        # A write that failed part-way (disk full, say) must not leave a
+        # truncated file behind that no record will ever point at.
+        remove_stored_file(stored_file_name)
+        raise
     return stored_file_name

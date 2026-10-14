@@ -1,5 +1,7 @@
 /** Display helpers shared by every area's screens. */
 
+import { localIsoDate } from "./dates";
+
 export const dash = (value) =>
   value === null || value === undefined || value === "" ? "—" : value;
 
@@ -48,11 +50,15 @@ export function formatExperience(years) {
   return `${Math.floor(value)}+ yrs`;
 }
 
-/** ISO timestamp -> just the date, which is all a list column needs. */
+/**
+ * ISO timestamp -> just the date, which is all a list column needs. The day
+ * the instant falls on where the user is: a record saved at 02:00 in India is
+ * that day's, not the previous one the UTC date would name.
+ */
 export function formatTimestamp(value) {
   if (!value) return "—";
   const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? "—" : parsed.toISOString().slice(0, 10);
+  return Number.isNaN(parsed.getTime()) ? "—" : localIsoDate(parsed);
 }
 
 /**
@@ -61,10 +67,33 @@ export function formatTimestamp(value) {
  * a number is shown as typed rather than silently mangled.
  */
 export function formatAmount(value) {
-  if (value === null || value === undefined || value === "") return "—";
-  const amount = Number(value);
+  // Blank after trimming counts as blank: a field holding only spaces has no
+  // amount in it, and reading it as "₹ 0" would state a figure nobody entered.
+  // The number 0 is not caught by this -- "0" does not trim away -- so a real
+  // zero still reads as one.
+  if (value === null || value === undefined || String(value).trim() === "") return "—";
+  // Grouping is stripped before the number is read, because the money fields
+  // these come from are free text and "5,00,000" is how they are usually
+  // written. The server already reads them this way -- the _number_key stages
+  // in the project and tender routers strip commas and spaces before they
+  // compare or sort -- so displaying them without that was stricter than
+  // sorting them: the same value that sorted as five hundred thousand read
+  // back as raw text.
+  const amount = Number(String(value).replace(/[,\s]/g, ""));
+  // Anything that still does not parse is returned exactly as stored, not
+  // stripped -- "TBD", "As per BOQ", a figure with a currency word in it.
+  // Showing the odd value is how anyone finds out it is there.
   if (!Number.isFinite(amount)) return String(value);
   return `₹ ${amount.toLocaleString("en-IN")}`;
+}
+
+/** A file size in bytes as "240 KB" / "3.1 MB", for confirming what was
+ *  picked in a file input before it is uploaded. */
+export function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** Adds up amounts that arrive as strings from number inputs. */

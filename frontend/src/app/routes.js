@@ -25,25 +25,30 @@ export const paths = {
   documents: () => "/documents",
 };
 
-/** The four areas, in sidebar order. */
+/** The five areas, in sidebar order. */
 export const AREAS = [
+  {
+    key: "dashboard",
+    label: "Dashboard",
+    path: paths.home(),
+  },
   {
     key: "projects",
     label: "Projects",
     path: paths.projects(),
-    action: { label: "+ New Project", path: paths.newProject(), available: true },
+    action: { label: "+ New project", path: paths.newProject() },
   },
   {
     key: "cvs",
     label: "CVs",
     path: paths.cvs(),
-    action: { label: "+ New Employee", path: paths.newEmployee(), available: true },
+    action: { label: "+ New employee", path: paths.newEmployee() },
   },
   {
     key: "tenders",
     label: "Tenders",
     path: paths.tenders(),
-    action: { label: "+ New Tender", path: paths.newTender(), available: true },
+    action: { label: "+ New tender", path: paths.newTender() },
   },
   // No action: the document log captures a new entry through the form on the
   // page itself, so there is no separate route for the topbar button to go

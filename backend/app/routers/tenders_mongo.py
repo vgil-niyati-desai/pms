@@ -60,6 +60,10 @@ DATE_FIELDS = {"created_at", "updated_at"}
 SEARCH_FIELDS = ["title", "reference_number", "issuing_authority"]
 
 MAX_PAGE_SIZE = 200
+# The furthest page a list may ask for. Far past any real list, and far short
+# of the skip MongoDB can no longer represent -- which a page like 10**20
+# reached, as a 500. Beyond the last page is still a normal, empty page.
+MAX_PAGE = 100_000
 
 
 def _now_utc_ms() -> datetime:
@@ -198,7 +202,7 @@ def list_tenders(
     max_value: Optional[str] = None,
     open_only: bool = False,
     sort: str = DEFAULT_SORT,
-    page: int = Query(default=1, ge=1),
+    page: int = Query(default=1, ge=1, le=MAX_PAGE),
     page_size: int = Query(default=10, ge=1, le=MAX_PAGE_SIZE),
     tenders: Collection = Depends(get_tender_records),
 ):
@@ -572,6 +576,50 @@ def delete_criterion(
     tenders: Collection = Depends(get_tender_records),
 ):
     return _remove_nested(tenders, tender_id, "criteria", criterion_id)
+
+
+@router.put(
+    "/{tender_id}/criteria/{criterion_id}/compliance",
+    response_model=schemas.TenderOut,
+)
+def set_criterion_compliance(
+    tender_id: str,
+    criterion_id: str,
+    payload: schemas.CriterionComplianceIn,
+    tenders: Collection = Depends(get_tender_records),
+):
+    """Record whether the bid meets one criterion.
+
+    Its own call rather than part of the criterion body: a criterion PUT
+    replaces the whole requirement, so a drawer opened before this was
+    recorded would reset it on save -- the reason citing a project is its own
+    call too. In the other direction, update_criterion writes only the keys
+    _criterion_values names, so editing the requirement leaves what is
+    recorded here alone.
+
+    Nothing is derived: the status is what someone said it is. app/matching.py
+    is untouched by this and still only finds candidates.
+    """
+    if payload.owes_a_reason():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Please say why this criterion is not compliant, or why it cannot be "
+                "determined. A gap recorded without a reason cannot be acted on."
+            ),
+        )
+
+    if payload.status == "not_checked":
+        # Back to no judgement at all. A reason left attached to a criterion
+        # nobody has checked reads as a finding about it.
+        values = {"status": "not_checked", "note": None, "decided_by": None, "decided_at": None}
+    else:
+        values = payload.model_dump()
+        # The server's, never the client's -- like every other timestamp here.
+        values["decided_at"] = _now_utc_ms()
+    return _update_nested(
+        tenders, tender_id, "criteria", criterion_id, {"compliance": values}
+    )
 
 
 @router.get(

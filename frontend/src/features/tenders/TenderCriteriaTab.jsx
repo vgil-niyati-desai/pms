@@ -7,6 +7,7 @@ import { deleteCriterion } from "../../api/tenders";
 import { dash } from "../../lib/format";
 import {
   CRITERION_CATEGORIES,
+  complianceLabel,
   criteriaCountLabel,
   criterionSummary,
   isMatchable,
@@ -69,6 +70,21 @@ export default function TenderCriteriaTab({ tender, onOpen, onAdd, onChanged, on
       header: "Requirement type",
       className: "cell-tight",
       render: (criterion) => <StatusPill value={priorityLabel(criterion)} />,
+    },
+    {
+      key: "compliance",
+      header: "Compliance",
+      className: "cell-tight",
+      // What someone recorded, with the reason they gave underneath where one
+      // was owed -- a gap nobody can act on is a gap nobody has explained.
+      render: (criterion) => (
+        <>
+          <StatusPill value={complianceLabel(criterion)} />
+          {criterion.compliance?.note && (
+            <p className="muted hint">{criterion.compliance.note}</p>
+          )}
+        </>
+      ),
     },
     {
       key: "actions",

@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import DetailHeader from "../../components/DetailHeader";
+import DetailSkeleton from "../../components/DetailSkeleton";
 import StatusPill from "../../components/StatusPill";
 import TagChip from "../../components/TagChip";
 import Tabs from "../../components/Tabs";
@@ -11,9 +12,10 @@ import {
   getProject,
   linkDocument,
   listProjectDocuments,
+  listProjectTenders,
   unlinkDocument,
 } from "../../api/projects";
-import { dash, formatPeriod, EVIDENCE_TYPES, DOCUMENT_TYPES } from "./projectFields";
+import { dash, formatAmount, formatPeriod, EVIDENCE_TYPES, DOCUMENT_TYPES } from "./projectFields";
 import ProjectOverviewTab from "./ProjectOverviewTab";
 import AttachedDocumentsTab from "../documents/AttachedDocumentsTab";
 import AttachedDocumentDrawer from "../documents/AttachedDocumentDrawer";
@@ -52,6 +54,12 @@ export default function ProjectDetailPage() {
   const loadDocuments = useCallback(() => listProjectDocuments(projectId), [projectId]);
   const documents = useResource(loadDocuments, { initialData: [] });
   const projectDocuments = documents.data;
+
+  // The bids that put this project forward. Read from the tenders' own
+  // citation lists, so nothing a document action does here can change it --
+  // it is deliberately not reloaded by handleSaved below.
+  const loadCitingTenders = useCallback(() => listProjectTenders(projectId), [projectId]);
+  const citingTenders = useResource(loadCitingTenders, { initialData: [] });
 
   const heldTypes = useMemo(
     () => [...new Set(projectDocuments.map((document) => document.document_type))],
@@ -101,7 +109,18 @@ export default function ProjectDetailPage() {
   // after every document add, edit and delete, and without the data check
   // that reload replaced the header, the tabs and the open tab's contents
   // with "Loading..." each time the drawer saved.
-  if (project.loading && !project.data) return <p className="muted">Loading...</p>;
+  // The back link is known from the route, so it is drawn straight away
+  // rather than after the record: a slow load must not be a dead end.
+  if (project.loading && !project.data) {
+    return (
+      <>
+        <p className="muted page-note">
+          <Link to={paths.projects()}>&larr; Projects</Link>
+        </p>
+        <DetailSkeleton facts={4} tabs={TABS.length} />
+      </>
+    );
+  }
   // Only when there is nothing to fall back on. A reload that fails after
   // the record is already on screen -- the one handleSaved fires after every
   // document action -- used to replace the whole page with this card, so a
@@ -130,7 +149,8 @@ export default function ProjectDetailPage() {
         subtitle={record.client_name}
         facts={[
           { label: "Reference no.", value: dash(record.reference_number) },
-          { label: "Contract value", value: dash(record.contract_value) },
+          // The same formatter the tender header reads its value with.
+          { label: "Contract value", value: formatAmount(record.contract_value) },
           { label: "Duration", value: formatPeriod(record.start_date, record.end_date) },
           { label: "Department", value: dash(record.department) },
         ]}
@@ -208,6 +228,10 @@ export default function ProjectDetailPage() {
           documentsError={documents.error}
           onAddMissing={(type) => openAddDrawer(type)}
           onShowDocuments={openTypeGroup}
+          citingTenders={citingTenders.data}
+          citingTendersLoading={citingTenders.loading}
+          citingTendersError={citingTenders.error}
+          onOpenTender={(tender) => navigate(paths.tender(tender.id))}
         />
       )}
 

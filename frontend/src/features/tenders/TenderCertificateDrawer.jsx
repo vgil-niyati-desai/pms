@@ -1,10 +1,14 @@
 import { useRef, useState } from "react";
-import Drawer from "../../components/Drawer";
+import Drawer, { DrawerCancelButton } from "../../components/Drawer";
 import Field from "../../components/Field";
+import useFieldErrors from "../../hooks/useFieldErrors";
 import FormRow from "../../components/FormRow";
-import FileUpload from "../../components/FileUpload";
+import FileUpload, { takePickedFile } from "../../components/FileUpload";
 import DocumentFileSection from "../../components/DocumentFileSection";
 import ConfirmDelete from "../../components/ConfirmDelete";
+import DocumentUsageList from "../../components/DocumentUsageList";
+import useDocumentUsage from "../../hooks/useDocumentUsage";
+import useUnsavedChanges from "../../hooks/useUnsavedChanges";
 import {
   EMPTY_TENDER_CERTIFICATE,
   addCertificate,
@@ -48,6 +52,7 @@ export default function TenderCertificateDrawer({ tender, certificate, onClose, 
   const [file, setFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const fieldErrors = useFieldErrors();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
@@ -58,12 +63,26 @@ export default function TenderCertificateDrawer({ tender, certificate, onClose, 
   // its own. These remember that the first already succeeded, so a retry
   // finishes the job rather than starting it again -- as the attached
   // document drawer does.
+  // What closing this drawer would lose. The picked file is represented by
+  // its name: a File itself serialises to {}, so the snapshot would not see
+  // one being chosen.
+  const { dirty } = useUnsavedChanges({ ...form, _file: file ? file.name : "" });
   const createdIdRef = useRef(null);
   const deletedRef = useRef(false);
+  // A file this record shares -- with a project, a tender or another
+  // record -- is not this record's to delete. Asked when the drawer opens;
+  // a shared file is kept and only this record is removed. The delete
+  // names the same owner, so the server refuses (409) if that changed.
+  const owner = { fromTender: tender.id, fromItem: certificate?.id };
+  const usage = useDocumentUsage(isEditing ? certificate.document_id : null, owner);
+  const keepsFile = usage.otherUses.length > 0;
 
   function handleChange(e) {
-    const { name, value } = e.target;
+    const { id, name, value } = e.target;
     setForm((prev) => ({ ...prev, [name]: value }));
+    fieldErrors.clear(id);
+    // The date rule is about the pair, so editing either side settles it.
+    if (id === "tcert_valid_from") fieldErrors.clear("tcert_valid_to");
   }
 
   // The details this drawer's own form decides. Everything else on the
@@ -96,14 +115,12 @@ export default function TenderCertificateDrawer({ tender, certificate, onClose, 
     e.preventDefault();
     setError(null);
 
-    if (!form.name.trim()) {
-      setError("Please fill in the Certificate name.");
-      return;
-    }
+    const problems = {};
+    if (!form.name.trim()) problems.tcert_name = "Please fill in the Certificate name.";
     if (form.valid_from && form.valid_to && form.valid_to < form.valid_from) {
-      setError("Valid to cannot be before valid from.");
-      return;
+      problems.tcert_valid_to = "Valid to cannot be before valid from.";
     }
+    if (fieldErrors.report(problems)) return;
 
     setSubmitting(true);
     try {
@@ -142,14 +159,17 @@ export default function TenderCertificateDrawer({ tender, certificate, onClose, 
     try {
       // Once the file is gone a retry must not delete it again: it would 404
       // and never reach the record itself.
-      if (certificate.document_id && !deletedRef.current) {
-        await deleteAttachment(certificate.document_id);
+      if (certificate.document_id && !keepsFile && !deletedRef.current) {
+        await deleteAttachment(certificate.document_id, owner);
         deletedRef.current = true;
       }
       await deleteCertificate(tender.id, certificate.id);
       onSaved();
     } catch (err) {
       setDeleteError(err.message || "Could not delete this certificate.");
+      // Something else started using the file: ask again, which turns the
+      // dialog into the keep-the-file one with the reason shown.
+      if (err.status === 409) usage.reload();
       setDeleting(false);
     }
   }
@@ -160,15 +180,22 @@ export default function TenderCertificateDrawer({ tender, certificate, onClose, 
         title={isEditing ? "Edit submitted certificate" : "Add submitted certificate"}
         onClose={onClose}
         dismissable={!submitting && !deleting}
+        dirty={dirty}
       >
         <form onSubmit={handleSubmit}>
+          {fieldErrors.summary && <div className="alert alert-error">{fieldErrors.summary}</div>}
           {error && <div className="alert alert-error">{error}</div>}
 
           <p className="muted hint drawer-context">
             {tender.title} &middot; {tender.issuing_authority}
           </p>
 
-          <Field label="Certificate name *" htmlFor="tcert_name">
+          <Field
+            label="Certificate name *"
+            htmlFor="tcert_name"
+            required
+            error={fieldErrors.errors.tcert_name}
+          >
             <input
               id="tcert_name"
               name="name"
@@ -214,6 +241,7 @@ export default function TenderCertificateDrawer({ tender, certificate, onClose, 
               label="Valid to"
               htmlFor="tcert_valid_to"
               hint="Leave empty if it does not expire."
+              error={fieldErrors.errors.tcert_valid_to}
             >
               <input
                 id="tcert_valid_to"
@@ -236,7 +264,10 @@ export default function TenderCertificateDrawer({ tender, certificate, onClose, 
                   : "No file attached yet."
                 : null
             }
-            onChange={(e) => setFile(e.target.files[0] || null)}
+            error={fieldErrors.errors.tcert_file}
+            onChange={(e) =>
+              takePickedFile(e, { fieldId: "tcert_file", fieldErrors, setFile })
+            }
             ref={fileInputRef}
           />
 
@@ -254,22 +285,16 @@ export default function TenderCertificateDrawer({ tender, certificate, onClose, 
             <button type="submit" className="btn btn-primary" disabled={submitting || deleting}>
               {submitting ? "Saving..." : isEditing ? "Save changes" : "Add submitted certificate"}
             </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={onClose}
-              disabled={submitting || deleting}
-            >
-              Cancel
-            </button>
+            {/* Asks first when something is unsaved, like every other way out. */}
+            <DrawerCancelButton disabled={submitting || deleting} />
             {isEditing && (
               <button
                 type="button"
                 className="btn btn-danger form-actions-end"
                 onClick={() => setConfirmingDelete(true)}
-                disabled={submitting || deleting}
+                disabled={submitting || deleting || usage.pending}
               >
-                Delete
+                {usage.pending ? "Checking where it is used..." : "Delete"}
               </button>
             )}
           </div>
@@ -285,27 +310,40 @@ export default function TenderCertificateDrawer({ tender, certificate, onClose, 
       </Drawer>
 
       {confirmingDelete && (
-        <ConfirmDelete
-          title="Delete this certificate?"
-          confirmLabel="Delete certificate"
-          busy={deleting}
-          error={deleteError}
-          onConfirm={handleDelete}
-          onCancel={() => {
-            setConfirmingDelete(false);
-            setDeleteError(null);
-          }}
-        >
-          <p className="muted">
-            {certificate.name} — {tender.title}
-          </p>
-          <p className="muted">
-            {certificate.file_name
-              ? `The record and its uploaded file (${certificate.file_name}) will be permanently removed.`
-              : "The record will be permanently removed."}{" "}
-            This cannot be undone.
-          </p>
-        </ConfirmDelete>
+        <div className="drawer-confirm-layer">
+          <ConfirmDelete
+            title="Delete this certificate?"
+            confirmLabel="Delete certificate"
+            busy={deleting}
+            error={deleteError}
+            onConfirm={handleDelete}
+            onCancel={() => {
+              setConfirmingDelete(false);
+              setDeleteError(null);
+            }}
+          >
+            <p className="muted">
+              {certificate.name} — {tender.title}
+            </p>
+            {keepsFile ? (
+              <>
+                <p className="muted">The file is kept, because it is also used by:</p>
+                <DocumentUsageList uses={usage.otherUses} />
+                <p className="muted">
+                  Only this certificate record is removed. The file stays available to them. This cannot be
+                  undone.
+                </p>
+              </>
+            ) : (
+              <p className="muted">
+                {certificate.file_name
+                  ? `The record and its uploaded file (${certificate.file_name}) will be permanently removed.`
+                  : "The record will be permanently removed."}{" "}
+                This cannot be undone.
+              </p>
+            )}
+          </ConfirmDelete>
+        </div>
       )}
     </>
   );

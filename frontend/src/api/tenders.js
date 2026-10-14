@@ -228,6 +228,38 @@ export const deleteCriterion = (tenderId, criterionId) =>
   });
 
 /**
+ * Whether the bid meets a criterion, in the order the drawer offers them.
+ * The server keeps its own copy (COMPLIANCE_STATUSES in schemas.py); the two
+ * must agree.
+ *
+ * "Not checked" is the absence of a judgement, not a finding: it is what
+ * every criterion starts as, and is kept apart from "cannot determine",
+ * which is what someone concluded after looking.
+ */
+export const COMPLIANCE_STATUSES = [
+  "not_checked",
+  "compliant",
+  "not_compliant",
+  "undetermined",
+];
+
+/**
+ * Record whether the bid meets one criterion. `body` is
+ * `{ status, note?, decided_by? }`, and a reason is required for
+ * not_compliant and undetermined.
+ *
+ * Its own call, not part of the criterion: a criterion PUT replaces the whole
+ * requirement, so sending them together would let a stale drawer reset what
+ * someone recorded here. Returns the updated tender, like the calls above.
+ */
+export const setCriterionCompliance = (tenderId, criterionId, body) =>
+  requestJson(`/tenders/${tenderId}/criteria/${criterionId}/compliance`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+    fallback: "Failed to record compliance for this criterion",
+  });
+
+/**
  * The records that meet one criterion, by fixed rules on recorded data:
  * `{ mode, summary, notes, candidates, total, truncated }`. Read-only --
  * nothing is stored, and a result is only ever a suggestion.

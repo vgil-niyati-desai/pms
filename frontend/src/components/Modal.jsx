@@ -1,4 +1,5 @@
-import { useId } from "react";
+import { useId, useRef } from "react";
+import useDialogFocus from "../hooks/useDialogFocus";
 import useEscapeKey from "../hooks/useEscapeKey";
 
 /**
@@ -10,6 +11,7 @@ import useEscapeKey from "../hooks/useEscapeKey";
  */
 export default function Modal({ title, onClose, dismissable = true, children }) {
   const titleId = useId();
+  const panelRef = useRef(null);
 
   function requestClose() {
     if (dismissable) onClose();
@@ -17,13 +19,20 @@ export default function Modal({ title, onClose, dismissable = true, children }) 
 
   useEscapeKey(dismissable, requestClose);
 
+  // The whole dialog is the content here, so there is no inner part to prefer:
+  // a confirmation opens on its least destructive answer and returns focus to
+  // whatever asked the question.
+  useDialogFocus(panelRef);
+
   return (
     <div className="modal-backdrop" onClick={requestClose}>
       <div
+        ref={panelRef}
         className="modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
         <h2 id={titleId}>{title}</h2>

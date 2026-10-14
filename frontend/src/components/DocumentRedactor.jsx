@@ -1,15 +1,22 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import FilePreview from "./FilePreview";
+import { useRegisterDirty } from "../app/UnsavedChangesContext";
 import {
   createRedactedCopy,
   getRedactionSource,
   getSensitiveSuggestions,
   redactionPageImageUrl,
+  saveRedactedCopy,
 } from "../api/documents";
 
 /**
  * Redaction: cover the sensitive parts of a document, check the result, then
- * download a permanently redacted copy of it.
+ * either download a permanently redacted copy of it or save that copy into the
+ * document log as an entry of its own.
+ *
+ * Both routes leave the document being redacted exactly as it is. Saving adds
+ * a second file and a second log entry beside it; nothing here replaces the
+ * original's file, edits its record, or writes over the thing it read.
  *
  * Boxes reach the page two ways, and they are the same kind of thing once
  * they get there.
@@ -119,7 +126,8 @@ export default function DocumentRedactor({ documentId, fileName, onCancel, onDir
   const [scanError, setScanError] = useState("");
   const [reviewOpen, setReviewOpen] = useState(true);
 
-  // "preview" or "download" while that action is in flight, "" otherwise.
+  // "preview", "download" or "save" while that action is in flight, ""
+  // otherwise.
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
@@ -127,6 +135,9 @@ export default function DocumentRedactor({ documentId, fileName, onCancel, onDir
   // The selection the last successful download was generated from. Once a
   // copy of exactly this selection is on disk, closing loses nothing.
   const [downloadedFor, setDownloadedFor] = useState(null);
+  // The selection last saved into the document log, for the same reason: this
+  // work is no longer only in the browser, so closing cannot lose it.
+  const [savedFor, setSavedFor] = useState(null);
 
   const surfaceRef = useRef(null);
   const stageRef = useRef(null);
@@ -236,13 +247,18 @@ export default function DocumentRedactor({ documentId, fileName, onCancel, onDir
   // selection has already been downloaded as a redacted copy.
   const hasWork =
     confirmed.length > 0 || suggestions.some((suggestion) => suggestion.status !== PENDING);
-  const dirty = hasWork && downloadedFor !== confirmed;
+  const dirty = hasWork && downloadedFor !== confirmed && savedFor !== confirmed;
 
   // A layout effect, so the viewer knows in the same commit that added a box:
   // Escape pressed straight after drawing must already find it unsaved.
   useLayoutEffect(() => {
     if (onDirtyChange) onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
+
+  // The viewer guards its own exits; this is for a route change underneath
+  // it -- Back, say -- which NavigationGuard asks about. Registered directly,
+  // since the marks are this component's and not any form's.
+  useRegisterDirty(dirty);
 
   // A new page is a new image to wait for.
   useEffect(() => {
@@ -528,6 +544,43 @@ export default function DocumentRedactor({ documentId, fileName, onCancel, onDir
     }
   }
 
+  /**
+   * Logs the copy as its own entry in the document log.
+   *
+   * The areas go up, not the bytes: the server builds the copy from the same
+   * untouched original it has been reading all along, so what gets logged is
+   * its own redaction rather than a file this page handed it. The copy is
+   * generated fresh, so it is the same redaction as the preview rather than
+   * necessarily the same bytes -- a PDF carries its own identifier.
+   *
+   * Nothing is reported as saved unless the request came back with the entry,
+   * which the backend only returns once both the file and its record landed.
+   */
+  async function saveToLog() {
+    setBusy("save");
+    setError("");
+    setDone("");
+    try {
+      const payload = confirmed.map(({ page: index, x, y, width, height }) => ({
+        page: index,
+        x,
+        y,
+        width,
+        height,
+      }));
+      const saved = await saveRedactedCopy(documentId, payload);
+      setSavedFor(confirmed);
+      setDone(
+        `Saved ${saved.file_name} to the document log as a separate entry. ` +
+          `The original ${fileName || "document"} is unchanged.`,
+      );
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
   if (loadError) {
     return (
       <div className="redact-message">
@@ -611,11 +664,26 @@ export default function DocumentRedactor({ documentId, fileName, onCancel, onDir
           )}
           <button
             type="button"
-            className="btn btn-sm btn-primary"
+            className="btn btn-sm"
             onClick={generate}
             disabled={confirmed.length === 0 || busy !== ""}
           >
             {busy === "download" ? "Generating…" : "Generate redacted copy"}
+          </button>
+          {/* Disabled once this exact selection is in the log, so a second
+              click cannot file a near-identical second entry. Changing the
+              selection makes it a different copy, and enables it again. */}
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            onClick={saveToLog}
+            disabled={confirmed.length === 0 || busy !== "" || savedFor === confirmed}
+          >
+            {busy === "save"
+              ? "Saving…"
+              : savedFor === confirmed
+                ? "Saved to log"
+                : "Save to document log"}
           </button>
           <button type="button" className="btn btn-sm" onClick={onCancel} disabled={busy !== ""}>
             Cancel
@@ -629,9 +697,9 @@ export default function DocumentRedactor({ documentId, fileName, onCancel, onDir
       <p className="redact-hint muted">
         {preview ? (
           <>
-            This is the copy that will download — the covered text has been removed from it,
-            not hidden, so there is nothing left to select underneath. Back to selection to
-            adjust the areas; the original entry is not changed either way.
+            This is the copy that will be downloaded or logged — the covered text has been
+            removed from it, not hidden, so there is nothing left to select underneath. Back
+            to selection to adjust the areas; the original entry is not changed either way.
           </>
         ) : (
           <>
@@ -639,8 +707,9 @@ export default function DocumentRedactor({ documentId, fileName, onCancel, onDir
             accept them; a dotted one was read by OCR off a scanned page, so it is worth
             checking against the page. Solid white boxes are what will be redacted. Drag
             across the page to add one by hand, click any box to see what is under it, then
-            press Delete. Preview redaction shows the finished copy before you download it —
-            the original entry is not changed.
+            press Delete. Preview redaction shows the finished copy first; Generate
+            downloads it, and Save to document log files it as a separate entry beside the
+            original. The original entry is not changed by any of them.
           </>
         )}
       </p>
