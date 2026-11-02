@@ -54,7 +54,10 @@ const FILTER_SCHEMA = {
 
 export default function TendersListPage() {
   const navigate = useNavigate();
-  const { values, setValues, clear } = useQueryParams(FILTER_SCHEMA);
+  const { values, setValues } = useQueryParams(FILTER_SCHEMA);
+  // Everything back to its default except the Open/All view, which is not a
+  // filter: the hook's clear() empties the whole URL and would drop it too.
+  const clear = () => setValues({ ...FILTER_SCHEMA, view: values.view });
   // Handed over by the tender form after a delete: the record it confirms
   // no longer exists, so this is the only screen left to say it on.
   const [notice, setNotice] = useHandoffNotice();

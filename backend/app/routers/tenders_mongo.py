@@ -26,17 +26,21 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from pymongo import DESCENDING, ReturnDocument
 from pymongo.collection import Collection
 
-from .. import matching, schemas
+from .. import auth, matching, schemas
 from ..mongodb import (
     get_documents,
     get_employee_records,
     get_project_records,
     get_tender_records,
 )
-from .documents_mongo import serialise_document
+from .documents_mongo import require_document_reference, serialise_document
 from .projects_mongo import serialise_project, types_by_project
 
-router = APIRouter(prefix="/tenders", tags=["tenders"])
+router = APIRouter(
+    prefix="/tenders",
+    tags=["tenders"],
+    dependencies=[Depends(auth.require_roles("Admin"))],
+)
 
 # The statuses the "Open" view shows: tenders still being worked on. Must
 # match OPEN_STATUSES in the frontend's api/tenders.js.
@@ -408,12 +412,25 @@ def _remove_nested(
     return _serialise(updated)
 
 
+def _stored_document_id(
+    tenders: Collection, tender_id: str, field: str, item_id: str
+) -> Optional[str]:
+    """The document a nested record points at now, before it is changed."""
+    record = tenders.find_one(
+        {"_id": _object_id(tender_id), f"{field}.id": item_id}, {f"{field}.$": 1}
+    )
+    items = (record or {}).get(field) or []
+    return items[0].get("document_id") if items else None
+
+
 @router.post("/{tender_id}/cost-items", response_model=schemas.TenderOut, status_code=201)
 def add_cost_item(
     tender_id: str,
     payload: schemas.CostItemIn,
     tenders: Collection = Depends(get_tender_records),
+    documents: Collection = Depends(get_documents),
 ):
+    require_document_reference(documents, payload.document_id)
     return _add_nested(tenders, tender_id, "cost_items", payload.model_dump())
 
 
@@ -423,7 +440,13 @@ def update_cost_item(
     cost_item_id: str,
     payload: schemas.CostItemIn,
     tenders: Collection = Depends(get_tender_records),
+    documents: Collection = Depends(get_documents),
 ):
+    require_document_reference(
+        documents,
+        payload.document_id,
+        _stored_document_id(tenders, tender_id, "cost_items", cost_item_id),
+    )
     return _update_nested(tenders, tender_id, "cost_items", cost_item_id, payload.model_dump())
 
 
@@ -443,7 +466,9 @@ def add_certificate(
     tender_id: str,
     payload: schemas.TenderCertificateIn,
     tenders: Collection = Depends(get_tender_records),
+    documents: Collection = Depends(get_documents),
 ):
+    require_document_reference(documents, payload.document_id)
     return _add_nested(tenders, tender_id, "certificates", payload.model_dump())
 
 
@@ -453,7 +478,13 @@ def update_certificate(
     certificate_id: str,
     payload: schemas.TenderCertificateIn,
     tenders: Collection = Depends(get_tender_records),
+    documents: Collection = Depends(get_documents),
 ):
+    require_document_reference(
+        documents,
+        payload.document_id,
+        _stored_document_id(tenders, tender_id, "certificates", certificate_id),
+    )
     return _update_nested(tenders, tender_id, "certificates", certificate_id, payload.model_dump())
 
 

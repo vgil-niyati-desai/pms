@@ -61,6 +61,9 @@ const VIEW_SCHEMA = {
   criterion: "",
   // The criterion whose candidates are being looked at.
   candidates: "",
+  // The Documents tab's type filter, as on the project page: in the URL so
+  // it can be linked to, and so a save can clear it (see handleDocumentSaved).
+  group: "",
 };
 
 export default function TenderDetailPage() {
@@ -121,8 +124,20 @@ export default function TenderDetailPage() {
       ? (record.criteria || []).find((criterion) => criterion.id === values.candidates)
       : null;
 
-  function closeDrawers() {
-    setValues({ cost: "", cert: "", doc: "", type: "", cite: "", criterion: "", candidates: "" });
+  // `extra` rides in the same URL update: setValues patches the query string
+  // as it was last rendered, so a second call in the same handler would undo
+  // the first.
+  function closeDrawers(extra = {}) {
+    setValues({
+      cost: "",
+      cert: "",
+      doc: "",
+      type: "",
+      cite: "",
+      criterion: "",
+      candidates: "",
+      ...extra,
+    });
   }
 
   // Citing from the Evidence tab's drawer and from a criterion's candidates
@@ -162,8 +177,13 @@ export default function TenderDetailPage() {
   // criteria go through handleSaved above and stay as quiet as they always
   // were, which is outside what this fix touches.
   function handleDocumentSaved(outcome = {}) {
-    const { message = null } = outcome;
-    closeDrawers();
+    const { message = null, reveal = false } = outcome;
+    // A document that has just appeared must not be filed into a group the
+    // type filter is hiding: the save would look like it failed. Editing
+    // and deleting leave the filter alone, because nothing new appeared
+    // and losing the filter would lose the user's place. The same rule as
+    // the project page's handleSaved.
+    closeDrawers(reveal ? { group: "" } : {});
     tender.reload();
     documents.reload();
     setNotice(message);
@@ -347,6 +367,8 @@ export default function TenderDetailPage() {
           onAdd={(presetType = "") =>
             setValues({ tab: "documents", cost: "", cert: "", doc: "new", type: presetType })
           }
+          typeFilter={values.group}
+          onTypeFilterChange={(group) => setValues({ group })}
           emptyMessage="No documents attached to this tender yet."
         />
       )}

@@ -721,8 +721,13 @@ def run_suite(tenders, documents, offline=False):
     from bson import ObjectId
     from fastapi.testclient import TestClient
 
-    from app import main, mongodb
+    from app import auth, main, mongodb
 
+    main.app.dependency_overrides[auth.require_user] = lambda: {
+        "id": "verification",
+        "username": "verification",
+        "role": "Admin",
+    }
     main.app.dependency_overrides[mongodb.get_tender_records] = lambda: tenders
     main.app.dependency_overrides[mongodb.get_documents] = lambda: documents
     # A tender now cites projects, so the tender endpoints read and the
@@ -985,10 +990,16 @@ def run_suite(tenders, documents, offline=False):
         check("adding a cost bumps the tender's updated_at",
               instant(after_cost["updated_at"]) > instant(erp["updated_at"]))
 
+        # The pointer has to name a real entry in the document log: a made-up
+        # id is refused. An entry with no file is enough for this check.
+        pointer_doc = client.post("/documents/", data={
+            "document_type": "Payment Receipt", "category": "Tendering",
+            "client_name": "MSAMB", "submitted_by": "vansh",
+        }).json()
         res = client.put(f"/tenders/{erp_id}/cost-items/{cost['id']}", json={
             "cost_type": "EMD", "amount": "60000", "payment_mode": "DD",
             "instrument_number": "DD-4411", "paid_on": "2026-08-20",
-            "document_id": "abc123abc123abc123abc123", "file_name": "emd_receipt.pdf",
+            "document_id": pointer_doc["id"], "file_name": "emd_receipt.pdf",
         })
         ok = check("PUT /tenders/{id}/cost-items/{id} -> 200", res.status_code == 200, res.text)
         if ok:
@@ -1007,6 +1018,7 @@ def run_suite(tenders, documents, offline=False):
               res.status_code == 200 and res.json()["cost_items"] == [], res.text)
         check("deleting the same cost again -> 404",
               client.delete(f"/tenders/{erp_id}/cost-items/{cost['id']}").status_code == 404)
+        client.delete(f"/documents/{pointer_doc['id']}")  # leave the log as it was
 
         # A receipt deleted from the document log must not leave the cost item
         # pointing at nothing. The cost item keeps its amount and instrument

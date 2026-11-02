@@ -1,10 +1,11 @@
-﻿"""Document endpoints backed by MongoDB.
+"""Document endpoints backed by MongoDB.
 
 `id` is a 24-character ObjectId hex string, which the React app treats as
-opaque â€” it only ever compares ids and puts them in URLs.
+opaque — it only ever compares ids and puts them in URLs.
 """
 
 import hashlib
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ from pymongo import ReturnDocument
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
-from .. import detection, redaction, schemas, storage
+from .. import auth, detection, redaction, schemas, storage
 from ..mongodb import (
     get_documents,
     get_employee_records,
@@ -26,7 +27,13 @@ from ..mongodb import (
     get_tender_records,
 )
 
-router = APIRouter(prefix="/documents", tags=["documents"])
+logger = logging.getLogger("uvicorn.error")
+
+router = APIRouter(
+    prefix="/documents",
+    tags=["documents"],
+    dependencies=[Depends(auth.require_user)],
+)
 
 # What the document log can be ordered by. Every one except created_at is a
 # string, stored as typed (dates as ISO text, which sorts correctly as text).
@@ -97,6 +104,7 @@ def _maybe_object_id(value: Optional[str]) -> Optional[ObjectId]:
 def _document_usage(
     document_id: str,
     record: Dict[str, Any],
+    documents: Collection,
     projects: Collection,
     tenders: Collection,
     employees: Collection,
@@ -134,7 +142,12 @@ def _document_usage(
                 *owned_by("tender_id"),
             ]
         },
-        {"title": 1, "document_ids": 1, "cost_items.document_id": 1, "certificates.document_id": 1},
+        {
+            "title": 1,
+            "document_ids": 1,
+            "cost_items.document_id": 1,
+            "certificates.document_id": 1,
+        },
     ):
         tender_id = str(tender["_id"])
         roles = []
@@ -171,6 +184,16 @@ def _document_usage(
             "id": str(employee["_id"]),
             "label": (employee.get("full_name") or "").strip() or "Unnamed employee",
             "roles": roles or ["document"],
+        })
+
+    for copy in documents.find(
+        {"redacted_from_id": document_id}, {"file_name": 1}
+    ):
+        uses.append({
+            "kind": "document",
+            "id": str(copy["_id"]),
+            "label": copy.get("file_name") or "Redacted copy",
+            "roles": ["redacted copy"],
         })
 
     return uses
@@ -228,6 +251,7 @@ def _other_uses(
     document_id: str,
     record: Dict[str, Any],
     context: Dict[str, Optional[str]],
+    documents: Collection,
     projects: Collection,
     tenders: Collection,
     employees: Collection,
@@ -246,7 +270,9 @@ def _other_uses(
       An employee's employee_id is not a use of its own: it is stamped and
       released by the CVs and certifications, so it goes with them.
     """
-    uses = _document_usage(document_id, record, projects, tenders, employees)
+    uses = _document_usage(
+        document_id, record, documents, projects, tenders, employees
+    )
     kind, owner_id, item_id = context["kind"], context["id"], context["item"]
     if kind == "project":
         return [use for use in uses if not (use["kind"] == "project" and use["id"] == owner_id)]
@@ -312,12 +338,52 @@ def _require_project(projects: Collection, project_id: str) -> ObjectId:
     return oid
 
 
+def require_document_reference(
+    documents: Collection,
+    document_id: Optional[str],
+    stored_document_id: Optional[str] = None,
+) -> None:
+    """Refuse a document_id a nested record is being saved with that points
+    at nothing.
+
+    For the pointers a CV, a certification, a cost item and a submitted
+    certificate carry. Empty means "no document" and is always fine. Anything
+    else must be an ObjectId naming an entry in the log: 422 for text that
+    cannot be one, 404 for one that names nothing.
+
+    stored_document_id is what the record being edited holds now. Saving it
+    back unchanged is allowed even when the document has since been deleted,
+    so a record left pointing at nothing can still have its other fields
+    edited -- only a pointer being *set* has to resolve.
+
+    Read-only and called before anything is written, so a refusal leaves
+    both sides as they were.
+    """
+    if not document_id:
+        return
+    if stored_document_id and document_id == stored_document_id:
+        return
+    try:
+        oid = ObjectId(document_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=422, detail="document_id is not a valid document id.")
+    if documents.count_documents({"_id": oid}, limit=1) == 0:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+
 def backfill_file_hashes(collection: Collection) -> int:
     """Fill in file_hash for entries stored before hashing existed.
 
     Without this, duplicate detection would silently ignore any file already
     in the system. Entries whose file is missing from disk are skipped and
     stay null, which just means they can't be matched against.
+
+    Two legacy entries can hold the same bytes -- they were uploaded before
+    duplicates were refused -- and the unique index lets only one of them
+    carry the hash. The first to be hashed keeps it; the other is left null,
+    exactly like an entry whose file is missing, and named in the log. Nothing
+    is deleted, and an upload of that content is still refused because of the
+    entry that holds the hash. Any other database error is not caught here.
     """
     pending = list(
         collection.find(
@@ -329,7 +395,19 @@ def backfill_file_hashes(collection: Collection) -> int:
     for record in pending:
         digest = storage.hash_file_on_disk(record["stored_file_name"])
         if digest:
-            collection.update_one({"_id": record["_id"]}, {"$set": {"file_hash": digest}})
+            try:
+                collection.update_one(
+                    {"_id": record["_id"]}, {"$set": {"file_hash": digest}}
+                )
+            except DuplicateKeyError:
+                logger.warning(
+                    "Document %s (file %s) has the same content as another "
+                    "document that already holds its hash. Its file_hash is "
+                    "left unset; it is not deleted.",
+                    record["_id"],
+                    record["stored_file_name"],
+                )
+                continue
             updated += 1
     return updated
 
@@ -341,7 +419,9 @@ def _redacted_copy_notes(record: Dict[str, Any]) -> str:
     this is not what identifies the copy -- it is what makes it obvious in a
     plain read of the collection, where neither of those is being looked at.
     """
-    source_name = record.get("file_name") or record.get("stored_file_name") or "a document"
+    source_name = storage.safe_display_name(
+        record.get("file_name"), default=record.get("stored_file_name") or "a document"
+    )
     marker = f"Redacted copy of {source_name}."
     existing = (record.get("notes") or "").strip()
     if not existing:
@@ -349,32 +429,17 @@ def _redacted_copy_notes(record: Dict[str, Any]) -> str:
     return marker + "\n\n" + existing
 
 
-def _describe_duplicate(existing: Dict[str, Any]) -> str:
-    """Human-readable message pointing at the entry that already has this file."""
-    parts = [existing.get("document_type") or "another entry"]
-    if existing.get("client_name"):
-        parts.append("for " + str(existing["client_name"]))
-    if existing.get("project_title"):
-        parts.append("(" + str(existing["project_title"]) + ")")
-    where = " ".join(parts)
-    return (
-        'This exact file has already been uploaded as "'
-        + str(existing.get("file_name"))
-        + '" under '
-        + where
-        + ". Upload a different file, or edit that entry instead."
-    )
+# The same words for every duplicate, whoever is uploading. Naming the entry
+# that already holds the file -- its file name, type, client or project --
+# would show a Normal User details from a log they are not allowed to list.
+DUPLICATE_UPLOAD_MESSAGE = (
+    "This exact file has already been uploaded. Upload a different file instead."
+)
 
 
-def _duplicate_error(collection: Collection, file_hash: Optional[str]) -> HTTPException:
-    """Turn a unique-index violation into the same 409 the pre-check raises."""
-    existing = collection.find_one({"file_hash": file_hash}) if file_hash else None
-    detail = (
-        _describe_duplicate(existing)
-        if existing
-        else "This exact file has already been uploaded under another entry."
-    )
-    return HTTPException(status_code=409, detail=detail)
+def _duplicate_error() -> HTTPException:
+    """The 409 for a file another entry already holds."""
+    return HTTPException(status_code=409, detail=DUPLICATE_UPLOAD_MESSAGE)
 
 
 def _check_duplicate(
@@ -388,7 +453,7 @@ def _check_duplicate(
         query["_id"] = {"$ne": exclude_id}
     existing = collection.find_one(query)
     if existing:
-        raise HTTPException(status_code=409, detail=_describe_duplicate(existing))
+        raise _duplicate_error()
 
 
 def _save_upload(
@@ -402,7 +467,11 @@ def _save_upload(
     duplicate -- runs *before* anything is written to disk, so a rejected
     upload leaves no file behind and no database record is created.
     """
-    if not storage.allowed_file(document_file.filename):
+    # The cleaned name is the only one used from here on -- for the type
+    # check, the messages below and the extension -- so nothing the client
+    # put in the raw name can reach a response or a stored value.
+    file_name = storage.safe_display_name(document_file.filename)
+    if not storage.allowed_file(file_name):
         raise HTTPException(status_code=400, detail="File must be a PDF, PNG, or JPG.")
 
     # One byte past the limit is enough to know it is over, without holding
@@ -411,13 +480,13 @@ def _save_upload(
     if not contents:
         raise HTTPException(
             status_code=400,
-            detail=f'"{document_file.filename}" is empty (0 bytes). Please choose the actual file.',
+            detail=f'"{file_name}" is empty (0 bytes). Please choose the actual file.',
         )
     if len(contents) > storage.MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=413,
             detail=(
-                f'"{document_file.filename}" is larger than the {storage.MAX_UPLOAD_LABEL} '
+                f'"{file_name}" is larger than the {storage.MAX_UPLOAD_LABEL} '
                 "limit. Please upload a smaller or compressed copy."
             ),
         )
@@ -425,7 +494,7 @@ def _save_upload(
     file_hash = hashlib.sha256(contents).hexdigest()
     _check_duplicate(collection, file_hash, exclude_id=exclude_id)
 
-    stored_file_name = storage.write_upload(contents, document_file.filename)
+    stored_file_name = storage.write_upload(contents, file_name)
     return stored_file_name, file_hash
 
 
@@ -443,6 +512,7 @@ def create_document(
     notes: Optional[str] = Form(None),
     project_id: Optional[str] = Form(None),
     document_file: Optional[UploadFile] = File(None),
+    current_user: Dict[str, str] = Depends(auth.require_user),
     documents: Collection = Depends(get_documents),
     projects: Collection = Depends(get_project_records),
 ):
@@ -455,6 +525,11 @@ def create_document(
     project at all.
     """
     _check_document_date(document_date)
+    if current_user["role"] != "Admin" and project_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only Admins can attach a document to a project during upload.",
+        )
     project_oid = _require_project(projects, project_id) if project_id else None
 
     stored_file_name = None
@@ -462,7 +537,7 @@ def create_document(
     file_hash = None
 
     if document_file and document_file.filename:
-        original_file_name = document_file.filename
+        original_file_name = storage.safe_display_name(document_file.filename)
         # Raises 409 on a duplicate, before any file is written or any
         # document is inserted, so a rejected upload changes nothing.
         stored_file_name, file_hash = _save_upload(document_file, documents)
@@ -508,7 +583,7 @@ def create_document(
         # above (two simultaneous uploads of the same file). Clean up the
         # file this request wrote and report it like any other duplicate.
         storage.remove_stored_file(stored_file_name)
-        raise _duplicate_error(documents, file_hash)
+        raise _duplicate_error()
     except Exception:
         # Any other failed insert leaves no record to point at the file, so
         # the file goes too -- as the update path already does.
@@ -531,7 +606,9 @@ def create_document(
     return _serialise(record)
 
 
-def _sort_stages(sort: str) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+def _sort_stages(
+    sort: str, sortable=SORTABLE
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """The (stages before the sort, sort spec) for one sort option.
 
     The rules the projects list sorts by: blanks last whichever way the arrow
@@ -541,7 +618,7 @@ def _sort_stages(sort: str) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """
     descending = sort.startswith("-")
     key = sort.lstrip("-")
-    if key not in SORTABLE:
+    if key not in sortable:
         descending, key = True, "created_at"
     direction = -1 if descending else 1
 
@@ -560,7 +637,11 @@ def _sort_stages(sort: str) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     return stages, {"_sort_blank": 1, "_sort_key": direction, "_id": direction}
 
 
-@router.get("/types", response_model=List[str])
+@router.get(
+    "/types",
+    response_model=List[str],
+    dependencies=[Depends(auth.require_roles("Admin", "HOD"))],
+)
 def list_document_types(documents: Collection = Depends(get_documents)):
     """Every document type in use, for the log's type filter and form.
 
@@ -572,7 +653,11 @@ def list_document_types(documents: Collection = Depends(get_documents)):
     return sorted({v for v in values if isinstance(v, str) and v.strip()}, key=str.lower)
 
 
-@router.get("/categories", response_model=List[str])
+@router.get(
+    "/categories",
+    response_model=List[str],
+    dependencies=[Depends(auth.require_roles("Admin", "HOD"))],
+)
 def list_document_categories(documents: Collection = Depends(get_documents)):
     """Every category in use, for the log's category filter and the forms.
 
@@ -591,7 +676,11 @@ def list_document_categories(documents: Collection = Depends(get_documents)):
     return sorted({v for v in values if isinstance(v, str) and v.strip()}, key=str.lower)
 
 
-@router.get("/", response_model=schemas.DocumentPage)
+@router.get(
+    "/",
+    response_model=schemas.DocumentPage,
+    dependencies=[Depends(auth.require_roles("Admin", "HOD"))],
+)
 def list_documents(
     document_type: Optional[str] = None,
     category: Optional[str] = None,
@@ -654,7 +743,11 @@ def list_documents(
     }
 
 
-@router.get("/{document_id}", response_model=schemas.DocumentMongoOut)
+@router.get(
+    "/{document_id}",
+    response_model=schemas.DocumentMongoOut,
+    dependencies=[Depends(auth.require_roles("Admin", "HOD"))],
+)
 def get_document(document_id: str, documents: Collection = Depends(get_documents)):
     record = documents.find_one({"_id": _object_id(document_id)})
     if not record:
@@ -662,7 +755,10 @@ def get_document(document_id: str, documents: Collection = Depends(get_documents
     return _serialise(record)
 
 
-@router.get("/{document_id}/file")
+@router.get(
+    "/{document_id}/file",
+    dependencies=[Depends(auth.require_roles("Admin", "HOD"))],
+)
 def download_document_file(
     document_id: str,
     disposition: str = Query(
@@ -686,12 +782,20 @@ def download_document_file(
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File missing on server")
     # Stored names keep the original extension, so FileResponse still guesses
-    # the right Content-Type (application/pdf, image/png, image/jpeg) â€” which
+    # the right Content-Type (application/pdf, image/png, image/jpeg), which
     # is what an inline response needs to render rather than offer a save.
+    # The header is built here, not by FileResponse, so the name is cleaned
+    # and encoded the same way as the redacted-copy download's.
     return FileResponse(
         file_path,
-        filename=record.get("file_name"),
-        content_disposition_type=disposition,
+        headers={
+            "Content-Disposition": redaction.content_disposition_header(
+                storage.safe_display_name(
+                    record.get("file_name"), default=record["stored_file_name"]
+                ),
+                disposition,
+            )
+        },
     )
 
 
@@ -714,7 +818,11 @@ def _redaction_source(document_id: str, documents: Collection) -> Dict[str, Any]
     return record
 
 
-@router.get("/{document_id}/redaction/source", response_model=schemas.RedactionSource)
+@router.get(
+    "/{document_id}/redaction/source",
+    response_model=schemas.RedactionSource,
+    dependencies=[Depends(auth.require_roles("Admin", "HOD"))],
+)
 def get_redaction_source(document_id: str, documents: Collection = Depends(get_documents)):
     """How many pages the document has, and how big each one is.
 
@@ -725,7 +833,10 @@ def get_redaction_source(document_id: str, documents: Collection = Depends(get_d
     return redaction.source_payload(record["stored_file_name"], record.get("file_name"))
 
 
-@router.get("/{document_id}/redaction/pages/{page_index}")
+@router.get(
+    "/{document_id}/redaction/pages/{page_index}",
+    dependencies=[Depends(auth.require_roles("Admin", "HOD"))],
+)
 def get_redaction_page_image(
     document_id: str,
     page_index: int,
@@ -748,7 +859,9 @@ def get_redaction_page_image(
 
 
 @router.get(
-    "/{document_id}/redaction/suggestions", response_model=schemas.SensitiveScan
+    "/{document_id}/redaction/suggestions",
+    response_model=schemas.SensitiveScan,
+    dependencies=[Depends(auth.require_roles("Admin", "HOD"))],
 )
 def get_sensitive_suggestions(
     document_id: str, documents: Collection = Depends(get_documents)
@@ -766,7 +879,10 @@ def get_sensitive_suggestions(
     return detection.analyse(record["stored_file_name"])
 
 
-@router.post("/{document_id}/redacted-copy")
+@router.post(
+    "/{document_id}/redacted-copy",
+    dependencies=[Depends(auth.require_roles("Admin", "HOD"))],
+)
 def create_redacted_copy(
     document_id: str,
     request: schemas.RedactionRequest,
@@ -793,6 +909,7 @@ def create_redacted_copy(
     "/{document_id}/redacted-copy/save",
     response_model=schemas.DocumentMongoOut,
     status_code=201,
+    dependencies=[Depends(auth.require_roles("Admin", "HOD"))],
 )
 def save_redacted_copy(
     document_id: str,
@@ -842,7 +959,7 @@ def save_redacted_copy(
     file_hash = hashlib.sha256(contents).hexdigest()
     # Before anything is written, as _save_upload does for an ordinary upload.
     # Saving the same selection twice is the duplicate it looks like, and is
-    # refused with the message that names the entry already holding it.
+    # refused as one.
     _check_duplicate(documents, file_hash)
 
     # The extension comes from the *stored* name, which is always one of the
@@ -880,9 +997,9 @@ def save_redacted_copy(
     except DuplicateKeyError:
         # Two saves of the same selection racing each other. Same handling as
         # a duplicate upload: take this request's file back off disk and
-        # report the entry that already holds it.
+        # report it as a duplicate.
         storage.remove_stored_file(stored_file_name)
-        raise _duplicate_error(documents, file_hash)
+        raise _duplicate_error()
     except Exception:
         # Anything else -- the database unreachable mid-request, a write
         # refused. The file this request wrote has no entry pointing at it and
@@ -931,7 +1048,11 @@ def _set_nested_pointer_fields(
             )
 
 
-@router.put("/{document_id}", response_model=schemas.DocumentMongoOut)
+@router.put(
+    "/{document_id}",
+    response_model=schemas.DocumentMongoOut,
+    dependencies=[Depends(auth.require_roles("Admin", "HOD"))],
+)
 def update_document(
     document_id: str,
     document_type: Optional[str] = Form(None),
@@ -945,6 +1066,7 @@ def update_document(
     submitted_by: Optional[str] = Form(None),
     notes: Optional[str] = Form(None),
     document_file: Optional[UploadFile] = File(None),
+    current_user: Dict[str, str] = Depends(auth.require_user),
     documents: Collection = Depends(get_documents),
     employees: Collection = Depends(get_employee_records),
     tenders: Collection = Depends(get_tender_records),
@@ -966,12 +1088,17 @@ def update_document(
     showing a broken image for a receipt whose type changed.
     """
     oid = _object_id(document_id)
+    if current_user["role"] == "HOD" and document_file and document_file.filename:
+        raise HTTPException(
+            status_code=403,
+            detail="HODs may edit document metadata but cannot replace document files.",
+        )
     record = documents.find_one({"_id": oid})
     if not record:
         raise HTTPException(status_code=404, detail="Document not found")
     _check_document_date(document_date)
 
-    replacing =bool(document_file and document_file.filename)
+    replacing = bool(document_file and document_file.filename)
     previous_stored_file_name = record.get("stored_file_name")
     new_stored_file_name = None
     new_file_hash = None
@@ -999,8 +1126,11 @@ def update_document(
         "submitted_by": submitted_by,
         "notes": notes,
     }
+    new_file_name = (
+        storage.safe_display_name(document_file.filename) if replacing else None
+    )
     if replacing:
-        changes["file_name"] = document_file.filename
+        changes["file_name"] = new_file_name
         changes["stored_file_name"] = new_stored_file_name
         changes["file_hash"] = new_file_hash
 
@@ -1010,7 +1140,7 @@ def update_document(
         )
     except DuplicateKeyError:
         storage.remove_stored_file(new_stored_file_name)
-        raise _duplicate_error(documents, new_file_hash)
+        raise _duplicate_error()
     except Exception:
         # Don't leave the just-written replacement orphaned on disk.
         storage.remove_stored_file(new_stored_file_name)
@@ -1025,7 +1155,7 @@ def update_document(
         # After the document's own write has landed, so the copies can never
         # name a file the document itself does not have.
         _set_nested_pointer_fields(
-            document_id, {"file_name": document_file.filename}, employees, tenders
+            document_id, {"file_name": new_file_name}, employees, tenders
         )
 
     if replacing and previous_stored_file_name != new_stored_file_name:
@@ -1060,7 +1190,11 @@ _FROM_ITEM = Query(
 )
 
 
-@router.get("/{document_id}/usage", response_model=List[schemas.DocumentUsage])
+@router.get(
+    "/{document_id}/usage",
+    response_model=List[schemas.DocumentUsage],
+    dependencies=[Depends(auth.require_roles("Admin", "HOD"))],
+)
 def get_document_usage(
     document_id: str,
     from_project: Optional[str] = _FROM_PROJECT,
@@ -1084,8 +1218,12 @@ def get_document_usage(
     if not record:
         raise HTTPException(status_code=404, detail="Document not found")
     if context:
-        return _other_uses(document_id, record, context, projects, tenders, employees)
-    return _document_usage(document_id, record, projects, tenders, employees)
+        return _other_uses(
+            document_id, record, context, documents, projects, tenders, employees
+        )
+    return _document_usage(
+        document_id, record, documents, projects, tenders, employees
+    )
 
 
 def _describe_uses(uses: List[Dict[str, Any]]) -> str:
@@ -1096,9 +1234,14 @@ def _describe_uses(uses: List[Dict[str, Any]]) -> str:
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
-@router.delete("/{document_id}", status_code=204)
+@router.delete(
+    "/{document_id}",
+    status_code=204,
+    dependencies=[Depends(auth.require_roles("Admin", "HOD"))],
+)
 def delete_document(
     document_id: str,
+    current_user: Dict[str, str] = Depends(auth.require_user),
     from_project: Optional[str] = _FROM_PROJECT,
     from_tender: Optional[str] = _FROM_TENDER,
     from_employee: Optional[str] = _FROM_EMPLOYEE,
@@ -1137,11 +1280,28 @@ def delete_document(
     resolves and would otherwise show as a file that cannot be opened.
     """
     context = _owner_context(from_project, from_tender, from_employee, from_item)
+    if current_user["role"] == "HOD":
+        existing = documents.find_one({"_id": _object_id(document_id)})
+        if not existing:
+            raise HTTPException(status_code=404, detail="Document not found")
+        uses = _document_usage(
+            document_id, existing, documents, projects, tenders, employees
+        )
+        if uses:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "HODs may delete only documents that are not referenced by "
+                    "a project, tender, employee, CV, or certification."
+                ),
+            )
     if context:
         existing = documents.find_one({"_id": _object_id(document_id)})
         if not existing:
             raise HTTPException(status_code=404, detail="Document not found")
-        others = _other_uses(document_id, existing, context, projects, tenders, employees)
+        others = _other_uses(
+            document_id, existing, context, documents, projects, tenders, employees
+        )
         if others:
             if context["item"]:
                 advice = (
@@ -1163,38 +1323,56 @@ def delete_document(
     if not record:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    projects.update_many(
-        {"document_ids": document_id},
-        {
-            "$pull": {"document_ids": document_id},
-            "$set": {"updated_at": _now_utc_ms()},
-        },
-    )
+    stored_file_name = record.get("stored_file_name")
+    try:
+        projects.update_many(
+            {"document_ids": document_id},
+            {
+                "$pull": {"document_ids": document_id},
+                "$set": {"updated_at": _now_utc_ms()},
+            },
+        )
 
-    # A tender holds its documents in a list, exactly as a project does, so
-    # it is cleared the same way. Without this a document deleted from the
-    # log left its id behind in document_ids, pointing at nothing -- which is
-    # what the tender screen then tried to show.
-    tenders.update_many(
-        {"document_ids": document_id},
-        {
-            "$pull": {"document_ids": document_id},
-            "$set": {"updated_at": _now_utc_ms()},
-        },
-    )
+        # A tender holds its documents in a list, exactly as a project does,
+        # so it is cleared the same way. Without this a document deleted from
+        # the log left its id behind in document_ids, pointing at nothing --
+        # which is what the tender screen then tried to show.
+        tenders.update_many(
+            {"document_ids": document_id},
+            {
+                "$pull": {"document_ids": document_id},
+                "$set": {"updated_at": _now_utc_ms()},
+            },
+        )
 
-    # A tender's nested records point at a document the way a CV does, and
-    # are cleared the way a CV is: the cost item keeps its amount, its
-    # payment mode and its instrument number whether or not the receipt
-    # behind it still exists, so the record stays and only the pointer goes.
-    # These files are deliberately not the tender's *documents* -- the
-    # Documents tab holds what the bid was filed with, not what it cost --
-    # so they are reached from here and not through document_ids. The same
-    # write a replace makes to rename the copies, here clearing them.
-    _set_nested_pointer_fields(
-        document_id, {"document_id": None, "file_name": None}, employees, tenders
-    )
+        # A tender's nested records point at a document the way a CV does,
+        # and are cleared the way a CV is: the cost item keeps its amount,
+        # its payment mode and its instrument number whether or not the
+        # receipt behind it still exists, so the record stays and only the
+        # pointer goes. These files are deliberately not the tender's
+        # *documents* -- the Documents tab holds what the bid was filed with,
+        # not what it cost -- so they are reached from here and not through
+        # document_ids. The same write a replace makes to rename the copies,
+        # here clearing them.
+        _set_nested_pointer_fields(
+            document_id, {"document_id": None, "file_name": None}, employees, tenders
+        )
+    except Exception:
+        # The record is already gone, so the file has no owner either way;
+        # leaving it would only add an orphan to the dangling references.
+        # What cannot be undone from here is the references: some may still
+        # name this id, and nothing has repaired them. Say so, then let the
+        # original error through -- the caller must not be told this worked.
+        logger.exception(
+            "Document %s was deleted but clearing its references failed. "
+            "Projects, tenders, CVs, certifications or cost items may still "
+            "point at it and need to be cleared by hand. Removing its stored "
+            "file %s anyway.",
+            document_id,
+            stored_file_name,
+        )
+        storage.remove_stored_file(stored_file_name)
+        raise
 
-    storage.remove_stored_file(record.get("stored_file_name"))
+    storage.remove_stored_file(stored_file_name)
     return Response(status_code=204)
-

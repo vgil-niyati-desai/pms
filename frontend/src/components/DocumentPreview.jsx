@@ -1,11 +1,9 @@
 import { useCallback, useId, useRef, useState } from "react";
-import useDocumentFile from "../hooks/useDocumentFile";
 import useEscapeKey from "../hooks/useEscapeKey";
 import DocumentRedactor from "./DocumentRedactor";
 import FilePreview from "./FilePreview";
 import Modal from "./Modal";
-import { canRedact } from "../api/documents";
-import { saveBlob } from "../lib/download";
+import { canRedact, documentFileUrl } from "../api/documents";
 
 /**
  * Full-screen viewer for one uploaded file.
@@ -15,11 +13,10 @@ import { saveBlob } from "../lib/download";
  * a PNG/JPG as an image, with Download still one click away for when the file
  * is actually wanted on disk.
  *
- * The file is fetched once, through useDocumentFile, and both the preview and
- * Download work from those bytes. A file the server cannot serve -- gone from
- * disk, or the backend down -- is reported in the body in the backend's own
- * words, with a Retry; it used to render as the error JSON inside the frame,
- * and the Download link beside it navigated the whole app to that JSON.
+ * The backend renders uploaded files as page images for the preview, avoiding
+ * the browser's inconsistent PDF viewer support. Download uses the file route
+ * directly, which preserves its attachment response without a cross-origin
+ * fetch.
  *
  * Redact swaps the body for the selection view, where areas are marked and a
  * permanently redacted *copy* is generated. It is a mode of this viewer
@@ -36,7 +33,7 @@ import { saveBlob } from "../lib/download";
  * Cancel — asks first when there is something to lose, and does exactly
  * what was asked once the loss is confirmed.
  */
-export default function DocumentPreview({ documentId, fileName, title, onClose }) {
+export default function DocumentPreview({ documentId, fileName, title, onClose, onSavedToLog }) {
   const titleId = useId();
   const [redacting, setRedacting] = useState(false);
   // Read at the moment a route out is taken rather than held as state, so a
@@ -78,7 +75,6 @@ export default function DocumentPreview({ documentId, fileName, title, onClose }
   // registers after this one, so Escape cancels it and leaves the viewer be.
   useEscapeKey(true, requestClose);
 
-  const file = useDocumentFile(documentId);
   const heading = title || fileName || "Document";
   const redactable = canRedact(fileName);
 
@@ -103,18 +99,9 @@ export default function DocumentPreview({ documentId, fileName, title, onClose }
                 Redact
               </button>
             )}
-            {/* Saved from the bytes already fetched, not a link to the
-                server: a link would navigate the app to the error body when
-                the file cannot be served. Disabled until there is something
-                to save. */}
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => saveBlob(file.blob, fileName)}
-              disabled={!file.blob}
-            >
+            <a className="btn btn-primary" href={documentFileUrl(documentId)}>
               Download
-            </button>
+            </a>
             <button type="button" className="btn" onClick={() => requestExit("close")}>
               Close
             </button>
@@ -127,24 +114,15 @@ export default function DocumentPreview({ documentId, fileName, title, onClose }
               fileName={fileName}
               onCancel={() => requestExit("back")}
               onDirtyChange={reportDirty}
+              onSavedToLog={onSavedToLog}
             />
           ) : (
             <>
               <FilePreview
-                url={file.url}
+                documentId={documentId}
                 fileName={fileName}
-                mediaType={file.mediaType}
-                loading={file.loading}
-                error={file.error}
                 fill
               />
-              {file.error && (
-                <p>
-                  <button type="button" className="btn" onClick={file.reload}>
-                    Retry
-                  </button>
-                </p>
-              )}
             </>
           )}
         </div>

@@ -1,4 +1,5 @@
 import logging
+import os
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
@@ -6,8 +7,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 
-from . import mongodb
-from .routers import documents_mongo, employees_mongo, projects_mongo, tenders_mongo
+from . import auth, mongodb
+from .routers import (
+    company_documents_mongo,
+    documents_mongo,
+    employees_mongo,
+    projects_mongo,
+    proposal_library_mongo,
+    tenders_mongo,
+)
 
 load_dotenv()
 
@@ -85,13 +93,21 @@ app.add_middleware(UnexpectedErrorMiddleware)
 # while still refusing anything that is not this machine.
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=[
+        origin.strip().rstrip("/")
+        for origin in os.getenv("PMS_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    ],
     allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):517\d$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(documents_mongo.router)
+app.include_router(company_documents_mongo.router)
+app.include_router(proposal_library_mongo.router)
 app.include_router(projects_mongo.router)
 app.include_router(employees_mongo.router)
 app.include_router(tenders_mongo.router)
@@ -135,6 +151,8 @@ def on_startup():
     mongodb.ensure_project_indexes()
     mongodb.ensure_employee_indexes()
     mongodb.ensure_tender_indexes()
+    mongodb.ensure_auth_indexes()
+    mongodb.ensure_login_throttle_indexes()
 
     # Hash any files that were uploaded before duplicate detection
     # existed, otherwise they'd never be recognised as duplicates.

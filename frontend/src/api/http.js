@@ -6,7 +6,16 @@
  * than being written once per module.
  */
 
-export const API_BASE_URL = "http://localhost:8000";
+const configuredApiBase = import.meta.env?.VITE_API_BASE_URL;
+export const API_BASE_URL = (
+  configuredApiBase === undefined ? "http://localhost:8000" : configuredApiBase
+).replace(/\/+$/, "");
+
+let csrfToken = null;
+
+export function setCsrfToken(token) {
+  csrfToken = token;
+}
 
 /**
  * The sentence to show the user for a failed response.
@@ -37,9 +46,26 @@ export const UNREACHABLE_MESSAGE =
  * "Failed to fetch". fetch() rejects only for that (a TypeError); every
  * response, error statuses included, still comes back for the caller to read.
  */
-export async function apiFetch(url, options) {
+export async function apiFetch(url, options = {}) {
   try {
-    return await fetch(url, options);
+    const headers = new Headers(options.headers || {});
+    const method = (options.method || "GET").toUpperCase();
+    if (csrfToken && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+      headers.set("X-CSRF-Token", csrfToken);
+    }
+    const response = await fetch(url, {
+      ...options,
+      credentials: "include",
+      headers,
+    });
+    if (
+      response.status === 401 &&
+      !url.includes("/auth/login") &&
+      typeof window !== "undefined"
+    ) {
+      window.dispatchEvent(new Event("pms:auth-expired"));
+    }
+    return response;
   } catch (err) {
     if (err instanceof TypeError) throw new Error(UNREACHABLE_MESSAGE, { cause: err });
     throw err;

@@ -1,6 +1,6 @@
 """Permanent redaction of a stored file into a separate, new copy.
 
-Two rules shape everything in here:
+Three rules shape everything in here:
 
 1. **The original is read-only.** No function writes to UPLOAD_DIR, edits a
    database record, or replaces a stored file. Each one opens a stored file,
@@ -12,6 +12,13 @@ Two rules shape everything in here:
    so there is nothing underneath to select, copy, or pull back out with a
    text extractor. Images inside the box lose the covered pixels the same
    way.
+3. **The rest of the file is sanitised too.** A redaction pass rewrites a
+   page's content stream and nothing else, so a PDF carries the same words
+   in several places that pass never reaches: its metadata, its XMP packet,
+   its bookmark titles, its attachments, and the annotations and form
+   fields sitting on the page. `_sanitise_pdf` below clears them, because a
+   copy whose text is gone from the page but still readable in its /Info
+   dictionary is not redacted in any sense worth the name.
 
 Areas arrive in *normalised* page coordinates: x, y, width and height as
 fractions of the page, with the origin at its top-left corner. The browser
@@ -25,6 +32,7 @@ redaction endpoints rather than stop the whole API from starting.
 """
 
 import os
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -265,11 +273,75 @@ def _clean_areas(areas: List[Area], page_count: int) -> Dict[int, List[Area]]:
     return grouped
 
 
+def _intersects_any(rect, redacted: List[Any]) -> bool:
+    """Does an annotation's rectangle overlap any box drawn on its page?
+
+    PyMuPDF reports both `Annot.rect` and `Widget.rect` in de-rotated page
+    space, which is the space the boxes in `redacted` were converted to
+    before they were applied, so the two compare directly on a rotated page
+    as well as an upright one.
+    """
+    return any(rect.intersects(other) for other in redacted)
+
+
+def _sanitise_pdf(doc, redacted: Dict[int, List[Any]]) -> None:
+    """Strip what `apply_redactions` cannot reach.
+
+    MuPDF's redaction pass rewrites a page's content stream. Everything a
+    PDF carries outside that stream survives it untouched, and each of the
+    following was confirmed to hand the original's text straight to anyone
+    who opens the copy:
+
+      * the /Info dictionary -- a scanner or Word export routinely writes
+        the client, the reference or the figure into Title and Subject;
+      * the XMP packet, which keeps its own copy of the same fields;
+      * embedded files, recoverable whole;
+      * bookmark titles, which echo the heading that was just covered;
+      * annotations and form fields, whose text is both extractable and
+        still drawn on the page -- a form field's value sits on top of the
+        white fill and reads as if nothing had happened.
+
+    The document-level clears are unconditional: an attachment or a /Info
+    entry belongs to the file, not to a region of a page, so a copy made to
+    be handed out must not carry any of them.
+
+    The page-level ones are deliberately not. Only an annotation or a field
+    the user drew over is removed; one elsewhere on the page is content they
+    chose to keep, and the copy keeps it.
+    """
+    for name in doc.embfile_names():
+        doc.embfile_del(name)
+    doc.set_toc([])
+    doc.del_xml_metadata()
+    doc.set_metadata({})
+
+    for page_index, rects in redacted.items():
+        page = doc[page_index]
+        # delete_annot and delete_widget each return the next one, which is
+        # the only safe way to walk a list being deleted from: the objects a
+        # pre-built list holds go stale as soon as one of them is removed.
+        annot = page.first_annot
+        while annot:
+            if _intersects_any(annot.rect, rects):
+                annot = page.delete_annot(annot)
+            else:
+                annot = annot.next
+        widget = page.first_widget
+        while widget:
+            if _intersects_any(widget.rect, rects):
+                widget = page.delete_widget(widget)
+            else:
+                widget = widget.next
+
+
 def _redact_pdf(path: str, areas: List[Area]) -> bytes:
     pymupdf = _pymupdf()
     doc = _open_pdf(path)
     try:
         grouped = _clean_areas(areas, doc.page_count)
+        # What was actually applied, per page, for the sanitising pass below
+        # to measure annotations and form fields against.
+        applied: Dict[int, List[Any]] = {}
         for page_index, page_areas in grouped.items():
             page = doc[page_index]
             bounds = page.rect
@@ -299,6 +371,7 @@ def _redact_pdf(path: str, areas: List[Area]) -> bytes:
                 page.add_redact_annot(rect, fill=PDF_FILL)
             if not rects:
                 continue
+            applied[page_index] = rects
             # The defaults here are the strict ones, and they are what makes
             # this a real redaction: text under the rectangle is removed from
             # the content stream, covered image pixels are blanked inside the
@@ -310,6 +383,11 @@ def _redact_pdf(path: str, areas: List[Area]) -> bytes:
             # rendered.
             for rect in rects:
                 page.draw_rect(rect, color=PDF_FILL, fill=PDF_FILL, width=0)
+
+        # Last, so it runs over the finished pages: apply_redactions() drops
+        # the redaction annotations it consumed, and anything it left behind
+        # is what has to go.
+        _sanitise_pdf(doc, applied)
 
         # A full rewrite, never an incremental save: incremental would append
         # the changes and leave the original, un-redacted objects sitting in
@@ -365,11 +443,21 @@ def redact(stored_file_name: Optional[str], areas: List[Area]) -> Tuple[bytes, s
 def redacted_download_name(file_name: Optional[str], stored_file_name: str) -> str:
     """`invoice.pdf` -> `invoice_redacted.pdf`, so the copy is never mistaken
     for the original in a downloads folder."""
-    name = file_name or stored_file_name
+    # Cleaned again here: a record uploaded before names were sanitised may
+    # still hold a path or control characters, and this feeds both the
+    # download header and the copy's own stored file_name.
+    name = storage.safe_display_name(file_name, default=stored_file_name)
     stem, dot, extension = name.rpartition(".")
-    if not dot:
-        return f"{name}_redacted"
-    return f"{stem}_redacted.{extension}"
+    suffix = "_redacted"
+    tail = f"{dot}{extension}" if dot else ""
+    stem = stem if dot else name
+    # The suffix and extension count towards the same limit an upload's name
+    # is held to, so it is the stem that gives way.
+    room = storage.MAX_DISPLAY_NAME_LENGTH - len(suffix) - len(tail)
+    if room < 1:
+        # A tail too long to keep (it was only cut, never a real extension).
+        stem, tail, room = name, "", storage.MAX_DISPLAY_NAME_LENGTH - len(suffix)
+    return f"{stem[:room].rstrip()}{suffix}{tail}"
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +506,7 @@ def redacted_copy_response(
         content=content,
         media_type=media_type,
         headers={
-            "Content-Disposition": _attachment_header(download_name),
+            "Content-Disposition": content_disposition_header(download_name),
             # The copy exists only for this response; caching it would serve a
             # stale set of rectangles the next time a different one is drawn.
             "Cache-Control": "no-store",
@@ -429,13 +517,26 @@ def redacted_copy_response(
     )
 
 
-def _attachment_header(name: str) -> str:
-    """A Content-Disposition that survives a non-ASCII or quoted file name.
+def content_disposition_header(name: Optional[str], disposition: str = "attachment") -> str:
+    """A Content-Disposition for any download, safe whatever the file is called.
 
-    The bare `filename=` is the ASCII fallback every browser understands;
-    `filename*` carries the real name for the ones that read RFC 5987, which
-    is all of them in practice.
+    The name is cleaned first (see storage.safe_display_name), so a stored
+    name from before that existed is covered too. The bare `filename=` is an
+    ASCII fallback every browser understands: accents are folded away and
+    anything that could end the quoted string or the header -- quotes,
+    backslashes, slashes, semicolons, percent signs -- becomes `_`.
+    `filename*` carries the real name, percent-encoded, for the browsers that
+    read RFC 5987, which is all of them in practice.
     """
-    ascii_name = name.encode("ascii", "ignore").decode("ascii").replace('"', "")
-    ascii_name = ascii_name.strip() or "redacted-copy"
-    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(name)}'
+    if disposition not in ("attachment", "inline"):
+        disposition = "attachment"
+    clean = storage.safe_display_name(name, default="download")
+    folded = unicodedata.normalize("NFKD", clean).encode("ascii", "ignore").decode("ascii")
+    ascii_name = "".join(
+        char if " " <= char <= "~" and char not in '"\\/;%' else "_" for char in folded
+    ).strip()
+    ascii_name = ascii_name if any(char.isalnum() for char in ascii_name) else "download"
+    return (
+        f'{disposition}; filename="{ascii_name}"; '
+        f"filename*=UTF-8''{quote(clean, safe='')}"
+    )

@@ -92,6 +92,9 @@ export default function DashboardPage() {
           documentId={document.file_name ? document.id : null}
           fileName={document.file_name}
           title={`${document.document_type || "Document"} — ${document.client_name || ""}`}
+          // A redacted copy saved from the viewer is the newest entry in the
+          // log, which is exactly what this list shows.
+          onChanged={recentDocuments.reload}
         />
       ),
     },

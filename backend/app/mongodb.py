@@ -28,6 +28,10 @@ MONGO_COLLECTION_NAME = os.getenv("MONGO_COLLECTION", "documents")
 MONGO_PROJECTS_COLLECTION_NAME = os.getenv("MONGO_PROJECTS_COLLECTION", "projects")
 MONGO_EMPLOYEES_COLLECTION_NAME = os.getenv("MONGO_EMPLOYEES_COLLECTION", "employees")
 MONGO_TENDERS_COLLECTION_NAME = os.getenv("MONGO_TENDERS_COLLECTION", "tenders")
+MONGO_PROPOSAL_LIBRARY_COLLECTION_NAME = os.getenv("MONGO_PROPOSAL_LIBRARY_COLLECTION", "proposal_library")
+MONGO_USERS_COLLECTION_NAME = os.getenv("MONGO_USERS_COLLECTION", "users")
+MONGO_SESSIONS_COLLECTION_NAME = os.getenv("MONGO_SESSIONS_COLLECTION", "sessions")
+MONGO_LOGIN_THROTTLE_COLLECTION_NAME = os.getenv("MONGO_LOGIN_THROTTLE_COLLECTION", "login_throttle")
 
 # Short by default: a local MongoDB either answers immediately or isn't there.
 # Waiting pymongo's 30s default just makes an unreachable server look like a
@@ -154,6 +158,61 @@ def get_tender_records() -> Collection:
     return get_tenders_collection()
 
 
+def get_proposal_library_collection() -> Collection:
+    """Reusable proposal write-ups (see schemas.ProposalItemFields). Its own
+    collection: they belong to no project, tender or employee, which is what
+    the document log is organised around. Indexes come from migration 0014;
+    nothing creates them at startup."""
+    return get_database()[MONGO_PROPOSAL_LIBRARY_COLLECTION_NAME]
+
+
+def get_proposal_library() -> Collection:
+    """FastAPI dependency for the proposal library. See get_project_records."""
+    return get_proposal_library_collection()
+
+
+def get_users_collection() -> Collection:
+    return get_database()[MONGO_USERS_COLLECTION_NAME]
+
+
+def get_sessions_collection() -> Collection:
+    return get_database()[MONGO_SESSIONS_COLLECTION_NAME]
+
+
+def get_login_throttle_collection() -> Collection:
+    """FastAPI dependency for the login rate-limit counters. See
+    app/rate_limit.py -- one document per (dimension, hashed key, window)."""
+    return get_database()[MONGO_LOGIN_THROTTLE_COLLECTION_NAME]
+
+
+def ensure_auth_indexes() -> None:
+    """Create auth indexes; both operations are idempotent."""
+    get_users_collection().create_index(
+        [("username", ASCENDING)], name="ux_users_username", unique=True
+    )
+    get_sessions_collection().create_index(
+        [("token_hash", ASCENDING)], name="ux_sessions_token_hash", unique=True
+    )
+    get_sessions_collection().create_index(
+        [("expires_at", ASCENDING)], name="ix_sessions_expires_at", expireAfterSeconds=0
+    )
+
+
+def ensure_login_throttle_indexes() -> None:
+    """Create the login-throttle TTL index. Idempotent, like ensure_auth_indexes.
+
+    Each window document carries its own window_expires_at, so this index is
+    what makes old windows disappear on their own rather than accumulating.
+    The same index is created by migration 0007 -- whichever runs first wins,
+    create_index on an existing index is a no-op.
+    """
+    get_login_throttle_collection().create_index(
+        [("window_expires_at", ASCENDING)],
+        name="ix_login_throttle_window_expires_at",
+        expireAfterSeconds=0,
+    )
+
+
 def ping() -> Tuple[bool, Optional[str]]:
     """(reachable, error message). Never raises — callers use it to report
     status rather than to fail."""
@@ -204,6 +263,16 @@ def ensure_indexes(collection: Optional[Collection] = None) -> None:
     coll.create_index(
         [("redacted_from_id", ASCENDING)], name="ix_documents_redacted_from_id"
     )
+    # Company documents (scope="company"): the section's filters, and the
+    # stable import identity. The same indexes migration 0013 creates, by the
+    # same names.
+    coll.create_index([("scope", ASCENDING), ("category", ASCENDING)], name="ix_documents_scope_category")
+    coll.create_index(
+        [("source_key", ASCENDING)],
+        name="ux_documents_source_key",
+        unique=True,
+        partialFilterExpression={"source_key": {"$type": "string"}},
+    )
 
 
 def ensure_project_indexes(collection: Optional[Collection] = None) -> None:
@@ -243,6 +312,14 @@ def ensure_employee_indexes(collection: Optional[Collection] = None) -> None:
     # Multikey over the embedded certifications: the holds-certificate filter
     # and the flattened certification index both start from this.
     coll.create_index([("certifications.name", ASCENDING)], name="ix_employees_certification_names")
+    # Imported employee identities are unique when present; legacy and
+    # manually-created records may still have no source identity.
+    coll.create_index(
+        [("source_identity", ASCENDING)],
+        name="ux_employees_source_identity",
+        unique=True,
+        partialFilterExpression={"source_identity": {"$type": "string"}},
+    )
 
 
 def ensure_tender_indexes(collection: Optional[Collection] = None) -> None:

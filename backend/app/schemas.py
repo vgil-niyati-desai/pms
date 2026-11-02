@@ -11,6 +11,26 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from datetime import date, datetime
 import re
 
+from . import storage
+
+
+class _CleanFileName(BaseModel):
+    """Mixin for records that keep their own copy of a document's file name.
+
+    A CV, certification, cost item or submitted certificate takes `file_name`
+    in its JSON body, so it needs the same cleaning an upload gets. Absent and
+    empty values are left as they are; a name with nothing usable in it (only
+    separators or control characters) is not a name, so it becomes None
+    rather than the "document" placeholder an upload falls back to.
+    """
+
+    @field_validator("file_name", check_fields=False)
+    @classmethod
+    def _clean_file_name(cls, value: Optional[str]) -> Optional[str]:
+        if not value:
+            return value
+        return storage.safe_display_name(value, default="") or None
+
 
 class DocumentFields(BaseModel):
     """Every field the API returns except the identifier.
@@ -90,10 +110,10 @@ class DocumentUsage(BaseModel):
 
     `roles` says how it uses it, in words the screens can show as written:
     "attached document", "CV", "certification", "cost receipt",
-    "submitted certificate".
+    "submitted certificate", or "redacted copy".
     """
 
-    kind: Literal["project", "tender", "employee"]
+    kind: Literal["project", "tender", "employee", "document"]
     id: str
     label: str
     roles: List[str] = Field(default_factory=list)
@@ -296,6 +316,9 @@ class ProjectPage(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+MAX_EMPLOYEE_EDUCATION = 50
+
+
 class EmployeeFields(BaseModel):
     """The fields the employee form owns.
 
@@ -324,6 +347,7 @@ class EmployeeFields(BaseModel):
     # read back.
     full_name: str
     employee_code: Optional[str] = None
+    company: Literal["VGIL", "Fintech", "Unknown"] = "Unknown"
     designation: Optional[str] = None
     department: Optional[str] = None
     # The day they joined VGIL, and the day their professional career began.
@@ -334,6 +358,7 @@ class EmployeeFields(BaseModel):
     # Superseded by the two dates above. See the class docstring.
     experience_years: Optional[str] = None
     highest_qualification: Optional[str] = None
+    education: List[str] = Field(default_factory=list)
     key_skills: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
@@ -380,6 +405,11 @@ class EmployeeFields(BaseModel):
             raise ValueError("Total experience cannot be negative.")
         return value
 
+    @field_validator("education")
+    @classmethod
+    def _check_education(cls, value: List[str]) -> List[str]:
+        return _clean_list(value, MAX_EMPLOYEE_EDUCATION)
+
 
 class EmployeeIn(EmployeeFields):
     """What the employee form sends on create and on save.
@@ -396,7 +426,7 @@ class EmployeeIn(EmployeeFields):
         return _required(value, "Designation")
 
 
-class CvFields(BaseModel):
+class CvFields(_CleanFileName):
     """One version of an employee's CV.
 
     document_id points at the uploaded file in the document log; the frontend
@@ -424,7 +454,7 @@ class CvOut(CvFields):
     created_at: datetime
 
 
-class CertificationFields(BaseModel):
+class CertificationFields(_CleanFileName):
     """One certification held by an employee.
 
     Whether it is valid, expired, or has no expiry is never stored — it is a
@@ -483,6 +513,7 @@ class EmployeeOut(EmployeeFields):
     """
 
     id: str
+    source_identity: Optional[str] = None
     # Years since career_start_date. What a tender means by "shall have N
     # years' experience".
     total_experience_years: Optional[float] = None
@@ -635,7 +666,7 @@ class TenderIn(TenderFields):
         return self
 
 
-class CostItemFields(BaseModel):
+class CostItemFields(_CleanFileName):
     """One cost paid to pursue the tender: EMD, tender fee, DD charges.
 
     document_id points at the payment receipt in the document log, stored
@@ -670,7 +701,7 @@ class CostItemOut(CostItemFields):
     created_at: datetime
 
 
-class TenderCertificateFields(BaseModel):
+class TenderCertificateFields(_CleanFileName):
     """One certificate submitted with the bid."""
 
     name: Optional[str] = None
@@ -1439,3 +1470,161 @@ class SensitiveScan(BaseModel):
     pages_skipped: List[int] = []
     truncated: bool
     message: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Company documents
+#
+# Certificates, registrations and financial statements that belong to the
+# company itself rather than to a project, tender or employee. They are rows
+# of the shared document log marked with scope="company", so the file, its
+# hash, preview, download and delete are the log's own; only the descriptive
+# fields below are new. Nothing here is required beyond a title: a field the
+# source did not support stays empty rather than being guessed.
+# ---------------------------------------------------------------------------
+
+COMPANY_SCOPE = "company"
+# How close an expiry has to be before a document is called "expiring soon".
+EXPIRING_SOON_DAYS = 90
+COMPANY_STATUSES = ("valid", "expiring_soon", "expired", "unknown")
+# Where a metadata value came from. "manual" is anything a person typed; an
+# import never overwrites a record a person has saved.
+METADATA_SOURCES = ("manual", "ocr", "text_extraction", "filename")
+
+
+def company_status(expiry_date: Optional[str], today: Optional[date] = None) -> str:
+    """valid / expiring_soon / expired, or unknown when no expiry date is
+    recorded. Computed on read and never stored, so it cannot go stale.
+
+    "Unknown" is deliberate for a document with no expiry date: that may be a
+    permanent registration or simply a date nobody recorded, and the data
+    does not say which.
+
+    Only a date entered in `expiry_date` counts, so a certificate whose source
+    does not state an expiry is never called expired or expiring.
+    """
+    if not expiry_date:
+        return "unknown"
+    try:
+        expiry = date.fromisoformat(expiry_date)
+    except ValueError:
+        return "unknown"
+    today = today or datetime.utcnow().date()
+    if expiry < today:
+        return "expired"
+    if (expiry - today).days <= EXPIRING_SOON_DAYS:
+        return "expiring_soon"
+    return "valid"
+
+
+class CompanyDocumentFields(BaseModel):
+    title: Optional[str] = None
+    document_type: Optional[str] = None
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    issuing_organisation: Optional[str] = None
+    certificate_number: Optional[str] = None
+    issue_date: Optional[str] = None
+    expiry_date: Optional[str] = None
+    notes: Optional[str] = None
+    file_name: Optional[str] = None
+    metadata_source: Optional[str] = None
+    created_at: datetime
+
+
+class CompanyDocumentOut(CompanyDocumentFields):
+    id: str
+    status: str = "unknown"
+    has_file: bool = False
+
+
+class CompanyDocumentPage(BaseModel):
+    items: List[CompanyDocumentOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class CompanyFacet(BaseModel):
+    value: str
+    count: int
+
+
+class CompanyDocumentFacets(BaseModel):
+    categories: List[CompanyFacet]
+    subcategories: List[CompanyFacet]
+    document_types: List[CompanyFacet]
+    organisations: List[CompanyFacet]
+    statuses: List[CompanyFacet]
+    total: int
+
+
+# ---------------------------------------------------------------------------
+# Proposal library
+#
+# Reusable proposal write-ups (today: the CBS feature write-ups). Each is one
+# requirement from a source RFP -- identified by its section number, title
+# and point number -- with the answer VGIL wrote for it. They belong to no
+# tender, so they live in their own collection rather than the document log,
+# which holds tender, project and employee files. The original .docx/.rtf is
+# kept for download; its text is stored alongside so it can be searched and
+# read in the app without a Word viewer.
+# ---------------------------------------------------------------------------
+
+PROPOSAL_FILE_TYPES = ("docx", "rtf")
+
+
+class ProposalItemFields(BaseModel):
+    section_number: Optional[str] = None
+    section_title: Optional[str] = None
+    subsection: Optional[str] = None
+    point_number: Optional[int] = None
+    title: Optional[str] = None
+
+
+class ProposalItemRow(ProposalItemFields):
+    """One row of the library list: everything except the long texts."""
+
+    id: str
+    word_count: int = 0
+    image_count: int = 0
+    file_name: Optional[str] = None
+    file_type: Optional[str] = None
+    has_file: bool = False
+    extraction_method: Optional[str] = None
+    created_at: datetime
+
+
+class ProposalItemOut(ProposalItemRow):
+    requirement_text: Optional[str] = None
+    response_text: Optional[str] = None
+    source_path: Optional[str] = None
+
+
+class ProposalItemIn(ProposalItemFields):
+    """What the edit form sends. The texts are editable because the heuristic
+    that splits a write-up into requirement and response (first paragraph,
+    then the rest) can be wrong for an individual file."""
+
+    requirement_text: Optional[str] = None
+    response_text: Optional[str] = None
+
+    @field_validator("point_number")
+    @classmethod
+    def _check_point(cls, value: Optional[int]) -> Optional[int]:
+        if value is not None and not 0 <= value <= 100000:
+            raise ValueError("Point number must be between 0 and 100000.")
+        return value
+
+
+class ProposalItemPage(BaseModel):
+    items: List[ProposalItemRow]
+    total: int
+    page: int
+    page_size: int
+
+
+class ProposalSection(BaseModel):
+    section_number: Optional[str] = None
+    section_title: Optional[str] = None
+    count: int

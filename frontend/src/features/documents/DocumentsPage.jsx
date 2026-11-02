@@ -2,7 +2,9 @@ import { useCallback, useState } from "react";
 import Drawer from "../../components/Drawer";
 import DocumentForm from "./DocumentForm";
 import DocumentList from "./DocumentList";
+import DocumentUploadPage from "./DocumentUploadPage";
 import useHandoffNotice from "../../hooks/useHandoffNotice";
+import { useAuth } from "../../app/AuthContext";
 
 /**
  * The document log: the table of everything captured so far, with the entry
@@ -14,6 +16,7 @@ import useHandoffNotice from "../../hooks/useHandoffNotice";
  * same drawer the CV, certification and attached-document lists use.
  */
 export default function DocumentsPage() {
+  const { user } = useAuth();
   const [refreshKey, setRefreshKey] = useState(0);
   // The entry loaded into the drawer, or null for "add new". Open is tracked
   // separately because null is itself a valid open state.
@@ -28,6 +31,8 @@ export default function DocumentsPage() {
   // does not re-run on every render of this page.
   const [formDirty, setFormDirty] = useState(false);
   const reportDirty = useCallback((dirty) => setFormDirty(dirty), []);
+
+  if (user.role === "Normal User") return <DocumentUploadPage />;
 
   function openCreate() {
     setEditingDocument(null);
@@ -105,6 +110,7 @@ export default function DocumentsPage() {
             editingDocument={editingDocument}
             onCancelEdit={closeDrawer}
             onDirtyChange={reportDirty}
+            allowReplacement={user.role === "Admin"}
           />
         </Drawer>
       )}

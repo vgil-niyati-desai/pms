@@ -39,7 +39,14 @@ function formFromDocument(doc) {
   return next;
 }
 
-export default function DocumentForm({ onSaved, editingDocument, onCancelEdit, onDirtyChange }) {
+export default function DocumentForm({
+  onSaved,
+  editingDocument,
+  onCancelEdit,
+  onDirtyChange,
+  uploadOnly = false,
+  allowReplacement = true,
+}) {
   // Whoever filed the last entry.
   const [rememberedAddedBy, rememberAddedBy] = useRememberedAddedBy();
   // What a new entry starts from. Used everywhere EMPTY_FORM stood for "a new
@@ -65,11 +72,17 @@ export default function DocumentForm({ onSaved, editingDocument, onCancelEdit, o
   // Every type the log holds, and always the entry's own: a CV, a receipt or
   // an imported entry used to open with a blank type, because the picker only
   // offered the five project evidence types.
-  const loadTypes = useCallback(() => listDocumentTypes(), []);
+  const loadTypes = useCallback(
+    () => (uploadOnly ? Promise.resolve([]) : listDocumentTypes()),
+    [uploadOnly],
+  );
   const types = useResource(loadTypes, { initialData: [] });
 
   // Suggestions only: the field still accepts whatever is typed.
-  const loadCategories = useCallback(() => listDocumentCategories(), []);
+  const loadCategories = useCallback(
+    () => (uploadOnly ? Promise.resolve([]) : listDocumentCategories()),
+    [uploadOnly],
+  );
   const categories = useResource(loadCategories, { initialData: [] });
   const typeOptions = documentTypeOptions(types.data, form.document_type);
   const editingId = editingDocument ? editingDocument.id : null;
@@ -284,15 +297,19 @@ export default function DocumentForm({ onSaved, editingDocument, onCancelEdit, o
         >
           <input id="submitted_by" name="submitted_by" type="text" value={form.submitted_by} onChange={handleChange} placeholder="Your name" />
         </Field>
-        <FileUpload
-          id="document_file"
-          name="document_file"
-          label={isEditing ? "Replace document (optional)" : "Upload document (PDF, PNG, or JPG)"}
-          hint={fileHint}
-          error={fieldErrors.errors.document_file}
-          onChange={handleFileChange}
-          ref={fileInputRef}
-        />
+        {isEditing && !allowReplacement ? (
+          <p className="muted">{fileHint} HODs can edit metadata but cannot replace the file.</p>
+        ) : (
+          <FileUpload
+            id="document_file"
+            name="document_file"
+            label={isEditing ? "Replace document (optional)" : "Upload document (PDF, PNG, or JPG)"}
+            hint={fileHint}
+            error={fieldErrors.errors.document_file}
+            onChange={handleFileChange}
+            ref={fileInputRef}
+          />
+        )}
       </FormRow>
 
       <Field label="Notes" htmlFor="notes">

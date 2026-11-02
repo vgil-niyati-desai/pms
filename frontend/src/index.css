@@ -371,6 +371,49 @@ img {
 .topbar .btn {
   flex-shrink: 0;
 }
+.auth-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.auth-user {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+}
+.auth-page {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 24px;
+}
+.auth-card {
+  width: min(100%, 440px);
+  padding: 32px;
+}
+.auth-card h1 {
+  margin: 0 0 6px;
+  font-size: 24px;
+}
+.auth-card > .muted {
+  margin: 0 0 24px;
+}
+.auth-brand {
+  margin-bottom: 24px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+}
+@media (max-width: 620px) {
+  .auth-user {
+    display: none;
+  }
+}
 .nav-toggle {
   display: none;
   flex-shrink: 0;
@@ -2105,6 +2148,46 @@ img.file-preview-fill {
   max-height: 100%;
   border: none;
   background: none;
+}
+.document-page-preview {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.document-page-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+.document-page-image {
+  flex: 1;
+  min-height: 0;
+  object-fit: contain;
+}
+.document-page-preview-fill {
+  height: 100%;
+}
+.document-page-preview-fill .document-page-image {
+  width: auto;
+  height: 1px;
+  max-width: 100%;
+  flex: 1;
+}
+.document-page-preview-fill .document-page-controls {
+  flex: 0 0 auto;
+}
+.document-page-preview .file-preview {
+  border: none;
+  background: none;
+}
+.document-page-preview-error {
+  max-width: 100%;
+  text-align: center;
 }
 
 /* The two things a drawer offers besides the preview itself. */

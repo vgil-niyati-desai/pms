@@ -23,9 +23,13 @@ export const paths = {
   // The original single-screen document log, now the fourth area in the
   // sidebar rather than a screen reached only by URL.
   documents: () => "/documents",
+  documentUpload: () => "/documents/upload",
+  companyDocuments: () => "/company-documents",
+  proposalLibrary: () => "/proposal-library",
+  users: () => "/admin/users",
 };
 
-/** The five areas, in sidebar order. */
+/** Application areas, filtered for the current role in AppShell. */
 export const AREAS = [
   {
     key: "dashboard",
@@ -57,6 +61,27 @@ export const AREAS = [
     key: "documents",
     label: "Documents",
     path: paths.documents(),
+  },
+  // Company-level certificates and registrations, kept apart from the
+  // document log (which also holds CVs, tender papers and project evidence).
+  {
+    key: "company-documents",
+    label: "Company Documents",
+    path: paths.companyDocuments(),
+    roles: ["Admin", "HOD"],
+  },
+  // Reusable write-ups (the CBS feature write-ups) that belong to no tender.
+  {
+    key: "proposal-library",
+    label: "Proposal Library",
+    path: paths.proposalLibrary(),
+    roles: ["Admin", "HOD"],
+  },
+  {
+    key: "users",
+    label: "User management",
+    path: paths.users(),
+    roles: ["Admin"],
   },
 ];
 

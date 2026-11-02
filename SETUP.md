@@ -8,48 +8,72 @@ Stack: React (Vite) frontend, FastAPI backend, MongoDB database (via
 pymongo). Runs entirely on internal/local infrastructure — no external or
 cloud services involved.
 
-Current status: MongoDB is the only database backend. Document metadata
-and file uploads are submitted from the React form, saved via the FastAPI
-backend, and stored in MongoDB.
+> Start with [`README.md`](README.md): prerequisites, quick start,
+> configuration, tests and the Linux deployment notes. This file is the
+> detailed reference for how each area works and for the operator tools.
 
-All three areas now have real backends: `/projects`, `/employees` and
-`/tenders` endpoints persisting to their own collections in the same
-database. The browser-local stores those screens used while there was no
-endpoint are gone — nothing in the frontend touches localStorage any more.
+MongoDB is the only database. Document metadata and uploaded files are
+submitted from the React forms, saved through the FastAPI backend, and stored
+in MongoDB (records) and `backend/app/uploads/` (files). Every area has its
+own endpoints and collection in the same database: documents, projects,
+employees, tenders, the proposal library, users, sessions and login throttling.
+The browser keeps only one thing locally: the "Added by" name last used on a
+document form (in `localStorage`).
 
 ## Folder structure
 
 ```
 procurement-management-system/
+├── README.md        overview, quick start, configuration, deployment notes
+├── SETUP.md         this file: detailed reference
 ├── backend/         FastAPI app (Python)
 │   ├── app/
 │   │   ├── main.py          entry point; mounts the routers
-│   │   ├── mongodb.py       MongoDB connection + index setup
+│   │   ├── mongodb.py       MongoDB connection, collection handles, index setup
 │   │   ├── storage.py       uploaded-file handling, shared by every router
 │   │   ├── schemas.py       request/response validation
 │   │   ├── redaction.py     manual PDF redaction
+│   │   ├── detection.py     automatic sensitive-figure detection (OCR)
+│   │   ├── auth.py          login, sessions, CSRF, roles, user accounts
+│   │   ├── rate_limit.py    login rate limiting (login_throttle)
+│   │   ├── create_admin.py  one-off bootstrap of the first Admin account
+│   │   ├── docx_text.py     text out of .docx/.rtf write-ups
+│   │   ├── proposal_library.py  builds a library record from a write-up file
+│   │   ├── employee_excel_import.py, employee_identity.py  employee workbook import
 │   │   ├── uploads/         uploaded files, named by UUID
 │   │   └── routers/
-│   │       ├── documents_mongo.py  document endpoints
-│   │       ├── projects_mongo.py   project endpoints
-│   │       ├── employees_mongo.py  employee/CV endpoints
-│   │       └── tenders_mongo.py    tender endpoints
-│   ├── verify_mongo.py      end-to-end check of the documents endpoints
-│   ├── verify_projects.py   end-to-end check of the projects endpoints
-│   ├── verify_employees.py  end-to-end check of the employee/CV endpoints
-│   ├── verify_tenders.py    end-to-end check of the tender endpoints
+│   │       ├── documents_mongo.py          document log endpoints
+│   │       ├── company_documents_mongo.py  company certificates and registrations
+│   │       ├── proposal_library_mongo.py   reusable proposal write-ups
+│   │       ├── projects_mongo.py           project endpoints
+│   │       ├── employees_mongo.py          employee/CV endpoints
+│   │       └── tenders_mongo.py            tender endpoints
+│   ├── migrations/          numbered one-off migrations, run by migrate.py
+│   ├── tests/               unittest suites; mongomock, no MongoDB needed
+│   ├── ocr/tessdata/        OCR language data
+│   ├── migrate.py           migration runner
+│   ├── import_company_documents.py   bulk import of company documents (3g)
+│   ├── import_proposal_library.py    bulk import of proposal write-ups (3h)
+│   ├── verify_*.py          older end-to-end checks of each area's endpoints
+│   ├── diagnose_detection.py  explains why a figure was or was not suggested (3f)
+│   ├── run.ps1              Windows launcher that uses the venv's Python
 │   ├── requirements.txt
-│   ├── requirements-dev.txt only needed for verify_mongo.py --offline
+│   ├── requirements-dev.txt mongomock/httpx: tests/ and the --offline runs
 │   └── .env.example         copy to .env and adjust
 ├── frontend/        React app (Vite)
+│   ├── tests/               node:test suites
 │   └── src/
-│       ├── app/          shell, sidebar, routes
-│       ├── components/   shared UI (table, drawer, modal, fields)
-│       ├── features/     one folder per area: projects, cvs, tenders, documents
+│       ├── app/          shell, sidebar, routes, auth context
+│       ├── components/   shared UI (table, drawer, modal, fields, previews)
+│       ├── features/     one folder per area: projects, cvs, tenders, documents,
+│       │                 company, library, users, dashboard
 │       ├── api/          one module per resource; http.js holds the shared
-│       │                 base URL and error handling
+│       │                 base URL, CSRF handling and error reading
 │       └── index.css     the whole visual system, driven by tokens in :root
 └── scripts/         standalone operator tools (not part of the app)
+    ├── google_drive_readonly.py  lists Drive metadata after browser OAuth
+    ├── llmthing_ocr.py           optional OCR helper for scanned certificates (3g)
+    ├── build_company_package.py  builds a company-document import package (3g)
     └── pdf_splitter/  splits a combined PDF using an Excel index
 ```
 
@@ -79,8 +103,8 @@ and the backend creates its indexes on startup.
 
 ## 1b. MongoDB setup
 
-MongoDB is not installed on this machine yet. Install the free MongoDB
-Community Server:
+MongoDB must be running somewhere the backend can reach. For local
+development on Windows, install the free MongoDB Community Server:
 
 1. Download it from <https://www.mongodb.com/try/download/community>
    (Platform: Windows, Package: msi).
@@ -136,12 +160,133 @@ code on its own, using an in-memory stand-in:
 .\venv\Scripts\python.exe verify_mongo.py --offline
 ```
 
+Run the authentication and login rate-limiting tests without MongoDB (they
+use mongomock):
+
+```
+.\venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
+```
+
 The backend deliberately still starts when MongoDB is unreachable — it
 prints a warning, `http://127.0.0.1:8000/docs` still loads, and document
 requests return a `503` explaining what to fix, rather than the whole app
 refusing to boot.
 
-## 1c. Start the backend
+## Read-only Google Drive listing
+
+The standalone `scripts/google_drive_readonly.py` tool opens a browser for
+Google OAuth and requests the `drive.metadata.readonly` and `drive.readonly`
+scopes. The current CLI lists file/folder names, IDs, MIME types, and parent
+folder IDs; it does not read or download file contents. The Desktop OAuth
+client JSON is read directly from
+`C:\Users\HP\Downloads\client_secret_519613123942-l1no88nf9vg68akslms6iujav1k4kfjh.apps.googleusercontent.com.json`.
+
+Install the backend requirements if they have not already been installed,
+then run this from the `backend` folder:
+
+```
+.\venv\Scripts\python.exe ..\scripts\google_drive_readonly.py --limit 5
+```
+
+The OAuth token is stored under `%LOCALAPPDATA%\PMS\GoogleDrive`, outside the
+repository. Do not copy the client JSON or token into the project. The tool
+prints only Drive metadata and safe error messages, never OAuth credentials
+or tokens.
+
+## 1c. Authentication setup
+
+Authentication uses the same MongoDB database selected by `MONGO_DB_NAME`,
+with separate `users`, `sessions` and `login_throttle` collections. Startup
+creates indexes for those three collections only; no existing document,
+project, employee, or tender records are migrated or rewritten.
+
+The same indexes also have migrations, so an existing database can be brought
+up to date and checked before the application is started against it:
+`0007_login_throttle_indexes` creates the `login_throttle` TTL index, and
+`0008_auth_indexes` creates `ux_users_username` (unique),
+`ux_sessions_token_hash` (unique) and the `ix_sessions_expires_at` TTL index.
+Before creating anything, 0008 checks for usernames shared by more than one
+account, session token hashes shared by more than one session, more than one
+session record with no token hash (exactly one is normal: the account-change
+lock record), and existing indexes that clash by name or key. If it finds any,
+it stops the run with the list, writes nothing, and stays pending until they
+are resolved by hand. Run `--dry-run` first to see that list without writing
+(section 3b-i). Startup creates the same indexes without these checks, and a
+clash there stops the backend from starting.
+
+For local HTTP development, keep the local-only setting from `.env.example`:
+
+```
+PMS_COOKIE_SECURE=false
+PMS_COOKIE_SAMESITE=strict
+PMS_SESSION_HOURS=8
+```
+
+Create the first local administrator account from the `backend` folder after
+copying `.env.example` to `.env` and starting local MongoDB:
+
+```
+.\venv\Scripts\python.exe -m app.create_admin
+```
+
+The command prompts for the username and password, stores only a PBKDF2
+password hash, and refuses a remote MongoDB target or a database not named
+with a `_dev`, `_local`, or `_test` suffix by default. It creates an account
+marked `Admin`. Admins can then create accounts, assign the `Admin`, `HOD`,
+or `Normal User` role, enable or disable accounts, and revoke their sessions
+from the application's User management page. The API enforces role
+permissions independently of the frontend.
+
+Admins and HODs can use the Documents, Company Documents and Proposal Library
+workflows; HODs cannot replace files and can delete only documents with no
+references. Only Admins can use Projects, Employees/CVs, Tenders, or User
+management. Normal Users can upload documents but cannot list, view, download,
+edit, replace, delete, or redact documents, and have no access to Company
+Documents or the Proposal Library.
+Uploads do not yet record an authenticated owner; user-entered names are not
+used to grant ownership-based access. The optional `--allow-remote` mode
+requires an explicit typed database-name confirmation and should only be
+used by an operator after verifying the intended server target. This setup
+command has not been run against a server database.
+
+### Login rate limiting
+
+Failed logins are counted in the `login_throttle` collection, keyed by
+HMAC-SHA256 of the client IP and of the username, so neither is ever stored in
+plain text. Three dimensions: per IP, and per IP+username, are hard limits that
+answer `429` with a `Retry-After` header; per username alone is soft — it only
+adds a small, capped delay and never blocks, so attempts spread across many IPs
+cannot lock the real owner out. Old counting windows expire on their own
+through a TTL index on `window_expires_at`, created both by backend startup and
+by migration `0007_login_throttle_indexes`.
+
+Set `PMS_RATE_LIMIT_SECRET` (at least 32 characters) in `backend/.env` before
+running more than one worker or instance. Left unset, each process generates
+its own random secret and logs a warning on startup, and separate processes'
+counters will not agree with each other. The thresholds all have working
+defaults and are listed, commented out, in `.env.example`.
+
+The IP counted is the ASGI peer address only: `X-Forwarded-For` and `X-Real-IP`
+are deliberately ignored, because a client can set them and nothing here is
+configured to trust a proxy that strips them. Behind a reverse proxy, every
+request therefore falls in the one bucket belonging to the proxy's own address,
+which makes the per-IP limit coarse — a deployment that needs per-client limits
+needs a trusted-proxy configuration first. The per-IP+username and per-username
+dimensions are unaffected.
+
+The repository contains no production deployment or TLS/reverse-proxy
+configuration, so the production topology still needs to be confirmed by the
+deployment owner. For an HTTPS deployment, set `PMS_COOKIE_SECURE=true` and
+keep `PMS_COOKIE_SAMESITE=strict`. Prefer serving the frontend and API from
+the same site, with a reverse proxy routing API paths to FastAPI. Set
+`VITE_API_BASE_URL` at frontend build time to the API origin; an empty value
+uses the frontend origin. If frontend and API are on different origins, set
+`PMS_ALLOWED_ORIGINS` on the backend to the exact frontend origin(s) and
+configure the deployed API URL. Do not disable Secure cookies to compensate
+for an incorrect TLS or proxy setup. `SameSite=None` is accepted only when
+Secure cookies are enabled.
+
+## 1d. Start the backend
 
 ```
 .\run.ps1
@@ -181,28 +326,38 @@ npm install
 npm run dev
 ```
 
+For local development, copy `.env.example` to `.env.local` if the API is not
+running at `http://localhost:8000`, and set `VITE_API_BASE_URL` to its URL.
 This starts the React app, usually at `http://localhost:5173`. Open that
 in a browser.
 
-## 3. Test the full flow
+Sign in with the local administrator account created in section 1c.
 
-1. With both servers running, fill in the form (Document type, Category,
-   Client name, and Submitted by are required).
-2. Click **Save entry**.
-3. It should appear immediately in the **All Entries** table below the
-   form — that confirms the round trip worked (React → FastAPI →
-   MongoDB → back to React).
-4. To confirm directly in the database itself, open MongoDB Compass and
-   look at `doc_collection_dev` → `documents`, or from a terminal:
+The frontend has its own checks, run from the `frontend` folder. Neither needs
+the backend or MongoDB running:
+
+```
+npm test        (the node:test suites in frontend/tests/)
+npm run lint    (oxlint)
+```
+
+## 3. Check that it works
+
+1. With both servers running, sign in and open **Documents**.
+2. Click **+ Add document**, fill in the required fields (Document type,
+   Category, Client name, Added by), attach a PDF, PNG or JPG, and save.
+3. The entry should appear in the table straight away — that confirms the
+   round trip (React → FastAPI → MongoDB → back to React). Click the row to
+   edit it, **View** to preview the file, and **Delete** to remove it again.
+4. To look at the database itself, open MongoDB Compass, or from a terminal:
    ```
    mongosh
    use doc_collection_dev
    db.documents.find().pretty()
    ```
-   You should see your test document.
-5. `http://127.0.0.1:8000/health` reports which backend is active and
-   whether it is currently connected — the quickest way to tell a database
-   problem apart from a frontend one.
+5. `http://127.0.0.1:8000/health` reports whether the backend is currently
+   connected to MongoDB — the quickest way to tell a database problem apart from
+   a frontend one.
 
 ## 3b. What the Projects backend added
 
@@ -322,7 +477,26 @@ cases 0001 refuses, and does not claim a document that is already a
 project's.
 
 `0004_document_tender_id` and `0005_tender_cited_project_ids` are described
-in sections 3d-i and 3d-ii.
+in sections 3d-i and 3d-ii, `0006_document_redacted_from_id` in section 3e-i,
+and `0007_login_throttle_indexes` and `0008_auth_indexes` in section 1c.
+
+How the runner decides what to do:
+
+- It works on whatever `MONGO_*` resolves to. Variables already set in the
+  shell override `backend/.env`. It connects before printing the target, so
+  check the target first without connecting:
+  `.\venv\Scripts\python.exe -c "from app import mongodb; print(mongodb.safe_uri(), mongodb.MONGO_DB_NAME)"`
+- `--status` reads only the `migrations` collection: "applied" means a
+  migration's record is there, not that its index or field exists. An index
+  that backend startup already created still shows its migration as
+  `pending` until the migration runs; running it then creates nothing and
+  records it. `--status` and `--dry-run` write nothing.
+- A plain run applies pending migrations in order and records each as soon
+  as it finishes. If one raises, the run stops there: earlier ones stay
+  recorded, that one and later ones stay pending.
+- `--force` re-runs **every** migration, 0001 onwards, not just one; there
+  is no way to pick a single migration. Do not use it on a shared database
+  without a backup and a specific reason.
 
 Other types that are *not* renamed, deliberately: `Agreement`,
 `Acceptance of Tender-cum-Order`, `Acceptance of Quotation-cum-Order`,
@@ -373,6 +547,71 @@ than the free-text fields around them, deliberately: these two are what a
 displayed figure is *calculated* from, and a value that silently failed to parse
 would show no experience at all rather than a wrong one — the kind of blank
 nobody investigates.
+
+Employees also store their company affiliation (`VGIL`, `Fintech`, or
+`Unknown`) and a separate `education[]` list; education is not folded into
+`highest_qualification`. Imported records may carry a `source_identity` used
+for matching and duplicate prevention. It is not editable in the employee
+profile form. Migrations 0009–0011 backfill missing employee fields without
+replacing existing values, CVs, or certifications; migration 0012 adds a
+partial unique index for non-empty source identities.
+
+### Employee certification workbook import
+
+`app.employee_excel_import` reads the `VGIL` and `Fintech` sheets from
+`data_import/employee_certifications/CERTIFICATION OF EMPLOYEE.xlsx`. For
+VGIL, only Column A is used as the employee ID; the other `Employee id`
+column is ignored. Both conflicting VGIL ID 611 rows are always skipped.
+Fintech identities use `fintech:<normalized full name>`. AI certifications
+and education are joined to source employees only by an unambiguous,
+normalized full name; their workbook ID columns are never treated as verified
+VGIL identities. If there is no clear primary-workbook match, a new
+`Unknown`-affiliation employee uses `unknown:<normalized full name>`. Exact
+names repeated between AI and education are consolidated under that identity.
+Similar but non-identical names, including possible matches to existing
+employees or the excluded ID 611 records, go to the separate Manual Name
+Review list instead of being assigned or created automatically. Review rows
+include source workbook, sheet, physical row, possible matches, and reason.
+
+Start with a dry run against an isolated local database. No `.env` file is
+loaded; the target URI and database are explicit, and the tool refuses remote
+hosts or database names without a `_scratch`, `_test`, or `_local` suffix.
+`doc_collection_dev` is refused unless the operator explicitly supplies
+`--allow-doc-collection-dev`; loopback-host validation and the explicit
+identity allowlist still apply:
+
+```
+.\venv\Scripts\python.exe -m app.employee_excel_import `
+  --mongo-uri "mongodb://127.0.0.1:27184/" `
+  --database "pms_employee_certification_pilot_scratch" `
+  --source-identity "vgil:34" `
+  --source-identity "vgil:301" `
+  --source-identity "vgil:995"
+```
+
+The report separately lists employees to create, existing employees to update,
+skipped records, and Manual Name Review entries. An exact source-identity
+match is preferred; otherwise only one exact normalized full-name match may
+be updated. Duplicate matches, conflicting company/employee-code values, or
+inconsistent source rows are flagged for review and are not written. Updates
+add missing education and certification names, fill a missing identity only
+when the match is unambiguous, and set a missing or `Unknown` company only
+when the workbook verifies the affiliation. Auxiliary-only records do not
+change the company or identity of an existing VGIL/Fintech employee. Updates
+do not replace existing profile details, CVs, or certifications, and do not
+attach files to certification entries. Re-running the same import does not
+add duplicate employees, education, or certification names.
+
+Only after reviewing the dry-run report, the same explicitly selected sample
+can be applied with `--apply`. Apply mode requires an identity allowlist and
+is capped at 10 identities per invocation. Do not point it at a shared or
+server database; production import is intentionally outside this tool's
+permitted target scope. Apply one invocation at a time. Writes are made
+per employee rather than in a multi-document transaction; if an error is
+reported, review the listed earlier actions and rerun a dry run before retrying.
+
+The parser uses Python's standard library and does not download certificate
+files or follow workbook hyperlinks.
 
 ```
 GET    /employees/            one page: filter, sort, search, page
@@ -771,6 +1010,142 @@ JPG, PNG and rotated pages — checking that the figures are found, that the
 suggested boxes sit on actual ink, and that accepting them blanks exactly those
 pixels and nothing else.
 
+### Diagnosing a missed figure
+
+`backend/diagnose_detection.py` opens a PDF read-only and prints what the
+detector read and what it made of it, which answers "why was that amount not
+suggested?" (the text never arrived, no rule matched it, or a box was dropped).
+Usage is in the file's own header.
+
+## 3g. Company Documents
+
+The company's own certificates, registrations and financial statements. They
+are rows of the shared `documents` collection marked `scope: "company"`, so
+storage, hashing, duplicate refusal, preview, download and delete are the
+document log's own; they are kept apart from employee CVs and certifications,
+which are different records with their own owner.
+
+- **Fields:** title, document type, category, subcategory, issuing
+  organisation, certificate number, issue date, expiry date, notes. Only the
+  title and the file are required; a field the source does not support stays
+  empty rather than being guessed.
+- **Status** is computed on every read from the expiry date and never stored:
+  *Expired* (date passed), *Expiring soon* (within 90 days), *Valid*, or
+  *Expiry not recorded* when there is no expiry date. A date printed on a
+  certificate that does not state an expiry should not be entered as one.
+- **Endpoints:** `GET/POST /company-documents/`, `GET /company-documents/facets`,
+  `GET/PUT /company-documents/{id}`. The file itself is served by
+  `GET /documents/{id}/file`, and a delete is `DELETE /documents/{id}`.
+- **Access:** Admin and HOD may list, view, add and edit; only Admin may
+  replace the stored file. Normal Users have no access.
+- **Migrations:** `0013_company_documents` creates the `scope`/`category`
+  index and a unique `source_key` index (the stable import identity).
+
+### Bulk import (operator tools)
+
+No data is stored in this repository. To load a batch of company documents:
+
+1. **Build a package** on the machine that holds the originals:
+   `python -I scripts/build_company_package.py --source DIR --metadata FILE
+   --ocr-cache DIR --out DIR`. The metadata file is a JSON list; each entry
+   names a file by `path` (relative to `--source`) and carries only values
+   verified from the document (`title`, `document_type`, `category`,
+   `subcategory`, `issuing_organisation`, `certificate_number`, `issue_date`,
+   `expiry_date`, `notes`). The package is a `manifest.json` plus the files,
+   keyed by SHA-256, with any extracted text attached.
+2. **Take a backup**, then from `backend/`, with the migrations applied:
+   `python import_company_documents.py PACKAGE --confirm-db NAME --dry-run`
+   and, when the dry run looks right, the same without `--dry-run`.
+   `--confirm-db` must equal the database in use, so a script pointed at the
+   wrong environment stops instead of writing.
+
+The import is safe to repeat. Per file it reports *inserted* (new),
+*updated* (an already-imported record had an empty field the package can
+fill; filled fields are never overwritten and a record a person has saved is
+never touched), *skipped* (nothing to add, or the same file is already held by
+a non-company record, which is left as it is) or *failed* (missing file, hash
+mismatch, unsupported type or over the upload limit). Nothing is deleted. A
+report is written to `PACKAGE/reports/`.
+
+### Optional OCR helper
+
+Scanned certificates have no text layer. `scripts/llmthing_ocr.py` sends
+their pages to an LLMThing vision model and caches the transcription by file
+hash, so a file is never sent twice; pages that already have text are read
+directly. It needs a token in a file whose path is in the
+`LLMTHING_TOKEN_FILE` environment variable (never printed or stored), and
+optionally `LLMTHING_BASE_URL` and `LLMTHING_MODEL`. It is an operator tool run
+on a workstation; the server never needs it. OCR can misread long identifiers
+(certificate and registration numbers) — compare them with the document itself
+before putting them in the metadata file.
+
+## 3h. Proposal Library
+
+Reusable proposal write-ups — today the CBS feature write-ups — that belong to
+no tender. Each record is one requirement from a source RFP (identified by its
+section number, section title, optional subsection and point number) together
+with the answer written for it. They have their own `proposal_library`
+collection rather than the document log, which is organised around tenders,
+projects and employees.
+
+- **What is stored:** the original `.docx` or `.rtf` (kept for download) and
+  its extracted text, split on the pattern every sampled file follows: the
+  first paragraph is the requirement and the rest is the response. The split
+  is a heuristic, so both texts can be corrected in the edit form. Pictures in
+  a write-up are counted but not shown in the app; download the original to see
+  them. RTF text is stripped of its formatting rather than fully parsed.
+- **Screen:** search over requirement and response text, filters by part
+  (first number of the section), section, file type and pictures, sort by
+  section number (numerically: 3.2 before 3.10), a reading drawer with a
+  **Copy response** button, and add / edit / delete.
+- **Endpoints:** `GET/POST /proposal-library/`, `GET /proposal-library/sections`,
+  `GET/PUT/DELETE /proposal-library/{id}`, `GET /proposal-library/{id}/file`.
+  Uploads accept `.docx` and `.rtf` only, up to the same 20 MB limit; the
+  document log's PDF/PNG/JPG-only rule is unchanged.
+- **Access:** Admin and HOD. Normal Users have no access.
+- **Migration:** `0014_proposal_library` creates the indexes (section order, a
+  unique `source_key`, file type). Nothing creates them at startup, so apply it
+  before importing.
+
+### Bulk import
+
+`python import_proposal_library.py SOURCE_DIR --confirm-db NAME [--dry-run]`,
+from `backend/`. `SOURCE_DIR` is a folder whose sub-folders are the sections
+(for example `3.3.7 Loan account management`); the section number and title
+are read from the folder name, a deeper folder becomes the subsection, and a
+trailing number in the file name becomes the point number. Per file it reports
+*inserted*, *skipped* (the same bytes are already in the library) or *failed*
+(the file is not a valid `.docx`/`.rtf`); other file types are ignored and
+counted. It is safe to repeat, deletes nothing, and writes a report to an
+`import_reports/` folder next to `SOURCE_DIR`. Take a backup first.
+
+## Migrations at a glance
+
+Run from `backend/`: `python migrate.py --status`, `--dry-run`, then
+`python migrate.py` (`--force` re-runs one that is already recorded). Each
+migration records itself, so running the runner again does nothing. They change
+only the collections they name.
+
+| Migration | What it does |
+|---|---|
+| 0001 `document_project_id` | Populate `documents.project_id` from each project's document list, and index it. |
+| 0002 `standardise_contract_type` | Rename document type "Contract (Consultant Services)" to "Contract". |
+| 0003 `document_employee_id` | Populate `documents.employee_id` from employees' CVs and certifications, and index it. |
+| 0004 `document_tender_id` | Populate `documents.tender_id` from tenders' document lists, and index it. |
+| 0005 `tender_cited_project_ids` | Add `cited_project_ids` to every tender, and index it. |
+| 0006 `document_redacted_from_id` | Add `redacted_from_id` to every document, and index it. |
+| 0007 `login_throttle_indexes` | TTL index on the login rate-limit windows. |
+| 0008 `auth_indexes` | Unique username, unique session token hash, session expiry TTL. |
+| 0009 `employee_company` | Backfill missing employee company affiliations as "Unknown". |
+| 0010 `employee_education` | Initialise missing employee education arrays. |
+| 0011 `employee_source_identity` | Initialise missing employee source identities as null. |
+| 0012 `employee_source_identity_index` | Unique partial index on employee `source_identity`. |
+| 0013 `company_documents` | Indexes for company documents (`scope`/`category`, unique `source_key`). |
+| 0014 `proposal_library` | Indexes for the `proposal_library` collection. |
+| 0015 `remove_review_flags` | Remove the retired `needs_review` and `expiry_unverified` fields from company documents and the library. |
+
+Sections 3b–3f above describe the earlier ones in more detail.
+
 ## 4. PDF splitter (optional, separate from the app)
 
 `scripts/pdf_splitter/` is a standalone tool for cutting a large combined PDF
@@ -785,41 +1160,8 @@ and usage are in `scripts/pdf_splitter/README.md`.
   the app. `Ctrl+C` in either terminal stops that server.
 - If the frontend shows a network error when saving, double check the
   backend terminal is still running and reachable at port 8000.
-- Authentication and the personnel/CV tracking (deferred per Vansh) are
-  not part of this stage.
 - Uploaded files live on disk in `backend/app/uploads/`, named by UUID;
-  MongoDB stores only the metadata and the pointer.
-
-## What changed in the move to MongoDB
-
-- `documents` is now a MongoDB collection instead of a SQL table. There is
-  no schema to create and no migration to run.
-- Entry ids are now MongoDB ObjectIds, sent to the frontend as their
-  24-character hex string (e.g. `68ae1f...`) instead of `1`, `2`, `3`. The
-  React app only compares ids and puts them in URLs, so no frontend file
-  changed.
-- The search box still does a case-insensitive substring match over client
-  name, project title, and reference number — `ILIKE '%q%'` became a
-  case-insensitive regex, with the search text escaped so that characters
-  like `(` or `*` are matched literally.
-- Duplicate-file rejection still works the same way, and is now backed by a
-  unique index on `file_hash` so two entries cannot hold the same file even
-  if two uploads land at the same instant.
-- Indexes on `file_hash`, `created_at`, `document_type`, and `category` are
-  created on startup. That is idempotent, so it runs harmlessly every time.
-
-## PostgreSQL removal (done)
-
-MongoDB is now the only backend. The PostgreSQL layer has been deleted:
-`app/database.py`, `app/models.py`, `app/routers/documents.py`, the
-`DB_BACKEND` switch and `else:` branch in `app/main.py`, the PostgreSQL
-branch of `/health`, `DocumentOut` in `app/schemas.py`, the `sqlalchemy` and
-`psycopg2-binary` requirements, and the `DB_*` block in `.env` /
-`.env.example`.
-
-`app/storage.py` is shared and stayed. `backend/verify_*.py` still pass.
-
-The old `doc_collection_dev` PostgreSQL database was left alone — it still
-holds two rows of early smoke-test data (`ABC Bank` / `XYZ`, `sample.pdf`),
-which the application never used and can no longer reach. Drop that database
-by hand whenever you want the server space back.
+  MongoDB stores only the metadata and the pointer. Back the folder up together
+  with the database.
+- For deployment to a Linux server, see "Deploying to a Linux server" in
+  `README.md`.

@@ -42,7 +42,10 @@ const FILTER_SCHEMA = {
  */
 export default function CertificationsView() {
   const navigate = useNavigate();
-  const { values, setValues, clear } = useQueryParams(FILTER_SCHEMA);
+  const { values, setValues } = useQueryParams(FILTER_SCHEMA);
+  // Resets only this view's keys: the hook's clear() empties the whole URL,
+  // which would also drop the parent's `view` and land back on Employees.
+  const clear = () => setValues(FILTER_SCHEMA);
 
   const page = wholePage(values.certPage);
   const loadCertifications = useCallback(

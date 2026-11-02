@@ -22,6 +22,7 @@ import { addDays, localToday } from "../lib/dates";
 export const EMPTY_EMPLOYEE = {
   full_name: "",
   employee_code: "",
+  company: "Unknown",
   designation: "",
   department: "",
   // The two dates experience is derived from. There is no experience_years
@@ -31,6 +32,7 @@ export const EMPTY_EMPLOYEE = {
   date_of_joining: "",
   career_start_date: "",
   highest_qualification: "",
+  education: [],
   key_skills: "",
   email: "",
   phone: "",

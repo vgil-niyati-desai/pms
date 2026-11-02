@@ -22,6 +22,15 @@ from . import (
     m0004_document_tender_id,
     m0005_tender_cited_project_ids,
     m0006_document_redacted_from_id,
+    m0007_login_throttle_indexes,
+    m0008_auth_indexes,
+    m0009_employee_company,
+    m0010_employee_education,
+    m0011_employee_source_identity,
+    m0012_employee_source_identity_index,
+    m0013_company_documents,
+    m0014_proposal_library,
+    m0015_remove_review_flags,
 )
 
 MIGRATIONS = [
@@ -31,6 +40,15 @@ MIGRATIONS = [
     m0004_document_tender_id,
     m0005_tender_cited_project_ids,
     m0006_document_redacted_from_id,
+    m0007_login_throttle_indexes,
+    m0008_auth_indexes,
+    m0009_employee_company,
+    m0010_employee_education,
+    m0011_employee_source_identity,
+    m0012_employee_source_identity_index,
+    m0013_company_documents,
+    m0014_proposal_library,
+    m0015_remove_review_flags,
 ]
 
 # The collection holding one record per applied migration. Deliberately its

@@ -22,7 +22,12 @@ import { formatExperience } from "../../lib/format";
 function formFromEmployee(employee) {
   const next = { ...EMPTY_EMPLOYEE };
   for (const key of Object.keys(EMPTY_EMPLOYEE)) {
-    next[key] = employee[key] ?? EMPTY_EMPLOYEE[key];
+    next[key] =
+      key === "education"
+        ? Array.isArray(employee[key])
+          ? employee[key]
+          : []
+        : employee[key] ?? EMPTY_EMPLOYEE[key];
   }
   return next;
 }
@@ -95,6 +100,27 @@ export default function EmployeeFormPage() {
     fieldErrors.clear(name);
   }
 
+  function handleEducationChange(index, value) {
+    setForm((prev) => ({
+      ...prev,
+      education: prev.education.map((item, itemIndex) =>
+        itemIndex === index ? value : item,
+      ),
+    }));
+    fieldErrors.clear("education");
+  }
+
+  function addEducation() {
+    setForm((prev) => ({ ...prev, education: [...prev.education, ""] }));
+  }
+
+  function removeEducation(index) {
+    setForm((prev) => ({
+      ...prev,
+      education: prev.education.filter((_, itemIndex) => itemIndex !== index),
+    }));
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     setError(null);
@@ -143,8 +169,8 @@ export default function EmployeeFormPage() {
   }
 
   // Only an edit has something to wait for; the create form is ready at once.
-  // Name/code, designation/department, the two experience dates,
-  // qualification/email, phone/skills -- then notes below it.
+  // Name/code, affiliation, designation/department, the two experience dates,
+  // qualification/email, education, phone/skills -- then notes below it.
   if (isEditing && existing.loading) {
     return <FormSkeleton rows={5} wide={["textarea"]} />;
   }
@@ -188,6 +214,14 @@ export default function EmployeeFormPage() {
             />
           </Field>
         </FormRow>
+
+        <Field label="Company" htmlFor="company">
+          <select id="company" name="company" value={form.company} onChange={handleChange}>
+            <option value="VGIL">VGIL</option>
+            <option value="Fintech">Fintech</option>
+            <option value="Unknown">Unknown</option>
+          </select>
+        </Field>
 
         <FormRow>
           <Field
@@ -268,6 +302,31 @@ export default function EmployeeFormPage() {
             <input id="email" name="email" type="text" value={form.email} onChange={handleChange} />
           </Field>
         </FormRow>
+
+        <Field label="Education" hint="Add each qualification separately.">
+          {form.education.map((qualification, index) => (
+            <div className="form-row" key={`education-${index}`}>
+              <input
+                id={`education-${index}`}
+                type="text"
+                aria-label={`Education ${index + 1}`}
+                value={qualification}
+                onChange={(event) => handleEducationChange(index, event.target.value)}
+              />
+              <button
+                type="button"
+                className="btn"
+                aria-label={`Remove education ${index + 1}`}
+                onClick={() => removeEducation(index)}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          <button type="button" className="btn" onClick={addEducation}>
+            Add qualification
+          </button>
+        </Field>
 
         <FormRow>
           <Field label="Phone" htmlFor="phone">

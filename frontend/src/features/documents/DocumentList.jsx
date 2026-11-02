@@ -5,6 +5,7 @@ import {
   listDocumentTypes,
   listDocumentCategories,
   deleteDocument,
+  getDocumentUsage,
 } from "../../api/documents";
 import { listProjects } from "../../api/projects";
 import DataTable from "../../components/DataTable";
@@ -24,6 +25,8 @@ import usePageRecovery, { wholePage } from "../../hooks/usePageRecovery";
 import { formatAmount } from "../../lib/format";
 import { paths } from "../../app/routes";
 import { documentCategoryOptions, documentTypeOptions } from "./documentTypes";
+import { useAuth } from "../../app/AuthContext";
+import DocumentUsageList from "../../components/DocumentUsageList";
 
 const dash = (value) => value || "—";
 
@@ -50,6 +53,7 @@ function owners(row) {
 }
 
 export default function DocumentList({ refreshKey, onAdd, onEdit, onDeleted, editingId }) {
+  const { user } = useAuth();
   const { values, setValues } = useQueryParams(FILTER_SCHEMA);
 
   // useResource drops the answer to any request a newer one has replaced, so
@@ -105,6 +109,9 @@ export default function DocumentList({ refreshKey, onAdd, onEdit, onDeleted, edi
   const [pendingDelete, setPendingDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
+  const [deleteUses, setDeleteUses] = useState([]);
+  const [deleteUsageChecked, setDeleteUsageChecked] = useState(false);
+  const [checkingDeleteId, setCheckingDeleteId] = useState(null);
 
   // Any change to what is shown starts again from the first page; staying on
   // page 4 of a list that now has one page shows nothing.
@@ -136,15 +143,52 @@ export default function DocumentList({ refreshKey, onAdd, onEdit, onDeleted, edi
     );
   }
 
-  function requestDelete(row) {
+  async function requestDelete(row) {
     setDeleteError(null);
+    setDeleteUses([]);
+    setDeleteUsageChecked(false);
+    // Asked for whoever is deleting, and read differently by each. An HOD is
+    // refused outright when anything uses the document, so the answer decides
+    // whether Delete is offered at all. An Admin is never blocked by it: the
+    // delete clears those references, and the dialog's job is to say so
+    // before it happens rather than let it happen silently.
+    setCheckingDeleteId(row.id);
+    try {
+      const uses = await getDocumentUsage(row.id);
+      setDeleteUses(uses);
+      setDeleteUsageChecked(true);
+      if (uses.length && user.role === "HOD") {
+        setDeleteError("HODs may delete only unreferenced documents.");
+      }
+    } catch (error) {
+      // An Admin can still go ahead: the server answers the same question
+      // again on the delete itself. An HOD cannot, because confirmDisabled
+      // holds until the check has come back clean.
+      setDeleteError(error.message || "Could not check document references.");
+    } finally {
+      setCheckingDeleteId(null);
+    }
     setPendingDelete(row);
   }
 
   function cancelDelete() {
     setPendingDelete(null);
     setDeleteError(null);
+    setDeleteUses([]);
+    setDeleteUsageChecked(false);
   }
+
+  // Entries for the same client and project -- even with the same file name --
+  // differ by these, the same details their rows show.
+  const pendingDetails = pendingDelete
+    ? [
+        pendingDelete.document_date && `Dated ${pendingDelete.document_date}`,
+        pendingDelete.reference_number && `Ref. ${pendingDelete.reference_number}`,
+        pendingDelete.submitted_by && `Added by ${pendingDelete.submitted_by}`,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
 
   async function confirmDelete() {
     if (!pendingDelete) return;
@@ -159,6 +203,11 @@ export default function DocumentList({ refreshKey, onAdd, onEdit, onDeleted, edi
       // rather than show an empty page. Anything else reloads in place.
       if (rows.length === 1 && page > 1) setValues({ page: page - 1 });
       else documents.reload();
+      // The filters offer what the log holds, and it holds one entry fewer:
+      // the only document of its type or category takes that option with it.
+      // A save refreshes these through refreshKey; a delete has to itself.
+      types.reload();
+      categories.reload();
     } catch (err) {
       setDeleteError(err.message || "Could not delete this entry.");
     } finally {
@@ -242,6 +291,9 @@ export default function DocumentList({ refreshKey, onAdd, onEdit, onDeleted, edi
             documentId={r.file_name ? r.id : null}
             fileName={r.file_name}
             title={`${r.document_type} — ${r.client_name}`}
+            // A redacted copy saved from the viewer is a new row in this
+            // very list, so it is re-read once the viewer closes.
+            onChanged={documents.reload}
           />
           {r.redacted_from_id && <TagChip value="Redacted copy" />}
         </>
@@ -256,8 +308,13 @@ export default function DocumentList({ refreshKey, onAdd, onEdit, onDeleted, edi
       // clicking a row should do, and DataTable ignores clicks on a control.
       render: (r) => (
         <div className="row-actions">
-          <button type="button" className="btn btn-sm btn-danger" onClick={() => requestDelete(r)}>
-            Delete
+          <button
+            type="button"
+            className="btn btn-sm btn-danger"
+            onClick={() => requestDelete(r)}
+            disabled={checkingDeleteId === r.id}
+          >
+            {checkingDeleteId === r.id ? "Checking…" : "Delete"}
           </button>
         </div>
       ),
@@ -387,6 +444,7 @@ export default function DocumentList({ refreshKey, onAdd, onEdit, onDeleted, edi
         <ConfirmDelete
           title="Delete this entry?"
           busy={deleting}
+          confirmDisabled={user.role === "HOD" && (!deleteUsageChecked || deleteUses.length > 0)}
           error={deleteError}
           onConfirm={confirmDelete}
           onCancel={cancelDelete}
@@ -394,7 +452,31 @@ export default function DocumentList({ refreshKey, onAdd, onEdit, onDeleted, edi
           <p className="muted">
             {pendingDelete.document_type} &mdash; {pendingDelete.client_name}
             {pendingDelete.project_title ? ` (${pendingDelete.project_title})` : ""}
+            {pendingDetails && (
+              <>
+                <br />
+                {pendingDetails}
+              </>
+            )}
           </p>
+          {deleteUses.length > 0 && (
+            <>
+              <p className="muted">
+                {user.role === "HOD"
+                  ? "Remove this document from every linked record before deleting it."
+                  : "This document is used by:"}
+              </p>
+              <DocumentUsageList uses={deleteUses} />
+              {user.role !== "HOD" && (
+                <p className="muted">
+                  Deleting it detaches it from all of them. A project or tender loses the
+                  attachment; a CV, certification, cost item or submitted certificate keeps its
+                  own details but no longer has a file. A saved redacted copy is a separate
+                  entry and is not deleted.
+                </p>
+              )}
+            </>
+          )}
           <p className="muted">
             {pendingDelete.file_name
               ? `The record and its uploaded file (${pendingDelete.file_name}) will be permanently removed.`

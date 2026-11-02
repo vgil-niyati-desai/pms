@@ -45,11 +45,9 @@ import {
  *
  * Three things about the mechanics are worth knowing.
  *
- * The page is an image, not the usual preview. The normal preview hands a PDF
- * to the browser's own viewer inside an <iframe>, and an iframe is opaque —
- * nothing outside it can tell which page a click landed on, or where. So
- * redaction asks the backend to render each page and draws over that instead,
- * which also means PDFs and PNG/JPGs are selected in exactly the same way.
+ * The page is an image, not an opaque browser viewer. The backend renders
+ * each page and the redactor draws over it, which means PDFs and PNG/JPGs are
+ * selected in exactly the same way.
  *
  * The boxes here are only a *selection*. They are in fractions of the page
  * (origin top-left), sent to the backend, and it is the backend that deletes
@@ -105,7 +103,13 @@ function clamp01(value) {
   return Math.min(1, Math.max(0, value));
 }
 
-export default function DocumentRedactor({ documentId, fileName, onCancel, onDirtyChange }) {
+export default function DocumentRedactor({
+  documentId,
+  fileName,
+  onCancel,
+  onDirtyChange,
+  onSavedToLog,
+}) {
   const [source, setSource] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [pageIndex, setPageIndex] = useState(0);
@@ -574,6 +578,9 @@ export default function DocumentRedactor({ documentId, fileName, onCancel, onDir
         `Saved ${saved.file_name} to the document log as a separate entry. ` +
           `The original ${fileName || "document"} is unchanged.`,
       );
+      // The log has a row it did not have a moment ago. Told to whoever
+      // shows that log, so it can catch up once this viewer is closed.
+      if (onSavedToLog) onSavedToLog(saved);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -750,6 +757,7 @@ export default function DocumentRedactor({ documentId, fileName, onCancel, onDir
               key={pageIndex}
               className="redact-page"
               src={redactionPageImageUrl(documentId, pageIndex, pageRenderWidth(zoom))}
+              crossOrigin="use-credentials"
               alt={`Page ${pageIndex + 1} of ${fileName || "the document"}`}
               draggable={false}
               onLoad={() => setPageLoaded(true)}

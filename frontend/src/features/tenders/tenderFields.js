@@ -1,9 +1,21 @@
 import { daysBetween, localToday } from "../../lib/dates";
 
-/** Document types a tender collects, in the order they arrive. */
+/**
+ * Document types a tender collects, in the order they arrive.
+ *
+ * A bid folder holds the issuer's pack (the RFP / ITT / terms of reference,
+ * conditions, returnable forms) and VGIL's own response (technical and
+ * financial proposals), so those are named rather than all filed as Other.
+ * "Submitted Bid" stays for a bid kept as one file. Nothing in the backend
+ * depends on these names: a document's type is free text there.
+ */
 export const TENDER_DOCUMENT_TYPES = [
   "Tender Notice",
+  "Tender Document",
   "Corrigendum",
+  "Supporting Form",
+  "Technical Proposal",
+  "Financial Proposal",
   "Submitted Bid",
   "Award Letter",
   "Other",

@@ -10,9 +10,11 @@ export default function EmployeeProfileTab({ employee }) {
     // The two dates the header's experience figures are worked out from, so a
     // figure that looks wrong can be traced to the date behind it without
     // opening the edit form.
+    ["Company", dash(employee.company)],
     ["Career start", dash(employee.career_start_date)],
     ["Date of joining", dash(employee.date_of_joining)],
     ["Highest qualification", dash(employee.highest_qualification)],
+    ["Education", dash(employee.education?.join(", "))],
     ["Created", formatTimestamp(employee.created_at)],
     ["Last updated", formatTimestamp(employee.updated_at)],
   ];

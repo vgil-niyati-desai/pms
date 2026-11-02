@@ -67,8 +67,13 @@ def years_ago(years):
 def run_suite(employees, documents, offline=False):
     from fastapi.testclient import TestClient
 
-    from app import main, mongodb
+    from app import auth, main, mongodb
 
+    main.app.dependency_overrides[auth.require_user] = lambda: {
+        "id": "verification",
+        "username": "verification",
+        "role": "Admin",
+    }
     main.app.dependency_overrides[mongodb.get_employee_records] = lambda: employees
     main.app.dependency_overrides[mongodb.get_documents] = lambda: documents
     # Replacing a document's file renames the copy a tender's cost item or
@@ -376,17 +381,23 @@ def run_suite(employees, documents, offline=False):
         check("adding a CV bumps the employee's updated_at",
               instant(after_cv["updated_at"]) > instant(asha["updated_at"]))
 
+        # The pointer has to name a real entry in the document log: a made-up
+        # id is refused. An entry with no file is enough for this check.
+        pointer_doc = client.post("/documents/", data={
+            "document_type": "Resume CV", "category": "Personnel",
+            "client_name": "Asha Patil", "submitted_by": "vansh",
+        }).json()
         res = client.put(f"/employees/{asha_id}/cvs/{cv['id']}", json={
             "version_label": "2026 general, revised", "purpose": "MSAMB tender",
             "cv_date": "2026-02-01", "uploaded_by": "vansh",
-            "document_id": "abc123abc123abc123abc123", "file_name": "asha_cv.pdf",
+            "document_id": pointer_doc["id"], "file_name": "asha_cv.pdf",
         })
         ok = check("PUT /employees/{id}/cvs/{cv_id} -> 200", res.status_code == 200, res.text)
         if ok:
             edited = res.json()["cvs"][0]
             check("the CV edit was saved",
                   edited["version_label"] == "2026 general, revised"
-                  and edited["document_id"] == "abc123abc123abc123abc123"
+                  and edited["document_id"] == pointer_doc["id"]
                   and edited["file_name"] == "asha_cv.pdf", str(edited))
             check("the CV kept its id and created_at through the edit",
                   edited["id"] == cv["id"] and edited["created_at"] == cv["created_at"])
@@ -399,6 +410,7 @@ def run_suite(employees, documents, offline=False):
               res.status_code == 200 and res.json()["cvs"] == [], res.text)
         check("deleting the same CV again -> 404",
               client.delete(f"/employees/{asha_id}/cvs/{cv['id']}").status_code == 404)
+        client.delete(f"/documents/{pointer_doc['id']}")  # leave the log as it was
 
         # A CV's file replaced from the Documents log -- not through the CV
         # drawer, which writes the new name back itself -- must still show

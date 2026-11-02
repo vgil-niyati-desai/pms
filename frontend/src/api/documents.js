@@ -1,4 +1,4 @@
-﻿// The base URL and the error-envelope reader moved to http.js when Projects
+// The base URL and the error-envelope reader moved to http.js when Projects
 // gained its own client and needed both. Re-exported here so the modules and
 // screens already importing API_BASE_URL from this file keep working.
 import { API_BASE_URL, apiFetch, errorMessage, queryString, requestJson } from "./http";
@@ -159,7 +159,7 @@ export async function listDocumentCategories() {
  * Where the browser fetches a document's stored file.
  *
  * `inline` asks the backend to serve it for display instead of as a download,
- * which is what the preview needs â€” a PDF served as an attachment is
+ * which is what the preview needs — a PDF served as an attachment is
  * downloaded by the browser rather than rendered in the viewer. Leaving it off
  * gives the download URL, so the same helper answers both questions.
  */
@@ -219,7 +219,7 @@ export async function getRedactionSource(documentId) {
  * A rendered page image to draw rectangles over.
  *
  * The normal preview hands a PDF to the browser's own viewer in an iframe,
- * which is opaque â€” nothing outside it can tell where a click landed. Asking
+ * which is opaque — nothing outside it can tell where a click landed. Asking
  * the backend for the page as an image is what makes the selection possible.
  */
 export function redactionPageImageUrl(documentId, pageIndex, width) {
@@ -236,7 +236,7 @@ export function redactionPageImageUrl(documentId, pageIndex, width) {
  * redaction request with no special casing at either end. Nothing is redacted,
  * stored or changed by asking.
  *
- * Reports what it could not read as well as what it found â€” a scanned page
+ * Reports what it could not read as well as what it found — a scanned page
  * has no text layer, and coming back empty from one has to be distinguishable
  * from coming back empty from a clean one.
  */
@@ -252,8 +252,8 @@ export async function getSensitiveSuggestions(documentId) {
  * Generates the redacted copy and returns it as a blob plus the name to save
  * it under, which the backend supplies in Content-Disposition.
  *
- * `areas` are normalised to the page â€” x, y, width and height as fractions,
- * origin top-left â€” so the rectangles mean the same thing whatever size the
+ * `areas` are normalised to the page — x, y, width and height as fractions,
+ * origin top-left — so the rectangles mean the same thing whatever size the
  * page was rendered at in the browser.
  */
 export async function createRedactedCopy(documentId, areas) {

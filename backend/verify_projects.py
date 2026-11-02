@@ -59,10 +59,15 @@ def run_suite(projects, documents, offline=False):
     """
     from fastapi.testclient import TestClient
 
-    from app import main, mongodb
+    from app import auth, main, mongodb
 
     # Point the request path at these collections. Both are needed: the
     # has-document filter joins projects to the document log.
+    main.app.dependency_overrides[auth.require_user] = lambda: {
+        "id": "verification",
+        "username": "verification",
+        "role": "Admin",
+    }
     main.app.dependency_overrides[mongodb.get_project_records] = lambda: projects
     main.app.dependency_overrides[mongodb.get_documents] = lambda: documents
     # DELETE /documents/{id} now also clears the reference a tender holds, so

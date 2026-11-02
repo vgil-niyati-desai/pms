@@ -7,6 +7,7 @@ import {
   useRouteError,
 } from "react-router-dom";
 import AppShell from "./app/AppShell";
+import RequireAuth, { RequireRole } from "./app/RequireAuth";
 import { paths } from "./app/routes";
 import { ErrorFallback } from "./components/ErrorBoundary";
 import DashboardPage from "./features/dashboard/DashboardPage";
@@ -21,6 +22,11 @@ import TenderFormPage from "./features/tenders/TenderFormPage";
 import TenderDetailPage from "./features/tenders/TenderDetailPage";
 import DocumentsPage from "./features/documents/DocumentsPage";
 import NotFoundPage from "./features/NotFoundPage";
+import LoginPage from "./features/LoginPage";
+import DocumentUploadPage from "./features/documents/DocumentUploadPage";
+import CompanyDocumentsPage from "./features/company/CompanyDocumentsPage";
+import ProposalLibraryPage from "./features/library/ProposalLibraryPage";
+import UserManagementPage from "./features/users/UserManagementPage";
 
 /**
  * Every screen renders inside AppShell, so the sidebar and topbar are
@@ -51,23 +57,38 @@ function RouteError() {
 
 const router = createBrowserRouter(
   createRoutesFromElements(
-    <Route element={<AppShell />} errorElement={<RouteError />}>
-      <Route path={paths.home()} element={<DashboardPage />} />
-      <Route path={paths.projects()} element={<ProjectsListPage />} />
-      <Route path={paths.newProject()} element={<ProjectFormPage key="new" />} />
-      <Route path={paths.project(":projectId")} element={<ProjectDetailPage />} />
-      <Route path={paths.editProject(":projectId")} element={<ProjectFormPage key="edit" />} />
-      <Route path={paths.cvs()} element={<EmployeesListPage />} />
-      <Route path={paths.newEmployee()} element={<EmployeeFormPage key="new" />} />
-      <Route path={paths.employee(":employeeId")} element={<EmployeeDetailPage />} />
-      <Route path={paths.editEmployee(":employeeId")} element={<EmployeeFormPage key="edit" />} />
-      <Route path={paths.tenders()} element={<TendersListPage />} />
-      <Route path={paths.newTender()} element={<TenderFormPage key="new" />} />
-      <Route path={paths.tender(":tenderId")} element={<TenderDetailPage />} />
-      <Route path={paths.editTender(":tenderId")} element={<TenderFormPage key="edit" />} />
-      <Route path={paths.documents()} element={<DocumentsPage />} />
-      <Route path="*" element={<NotFoundPage />} />
-    </Route>,
+    <>
+      <Route path="/login" element={<LoginPage />} />
+      <Route element={<RequireAuth />}>
+        <Route element={<AppShell />} errorElement={<RouteError />}>
+          <Route element={<RequireRole roles={["Admin"]} />}>
+            <Route path={paths.home()} element={<DashboardPage />} />
+            <Route path={paths.projects()} element={<ProjectsListPage />} />
+            <Route path={paths.newProject()} element={<ProjectFormPage key="new" />} />
+            <Route path={paths.project(":projectId")} element={<ProjectDetailPage />} />
+            <Route path={paths.editProject(":projectId")} element={<ProjectFormPage key="edit" />} />
+            <Route path={paths.cvs()} element={<EmployeesListPage />} />
+            <Route path={paths.newEmployee()} element={<EmployeeFormPage key="new" />} />
+            <Route path={paths.employee(":employeeId")} element={<EmployeeDetailPage />} />
+            <Route path={paths.editEmployee(":employeeId")} element={<EmployeeFormPage key="edit" />} />
+            <Route path={paths.tenders()} element={<TendersListPage />} />
+            <Route path={paths.newTender()} element={<TenderFormPage key="new" />} />
+            <Route path={paths.tender(":tenderId")} element={<TenderDetailPage />} />
+            <Route path={paths.editTender(":tenderId")} element={<TenderFormPage key="edit" />} />
+            <Route path={paths.users()} element={<UserManagementPage />} />
+          </Route>
+          <Route element={<RequireRole roles={["Admin", "HOD"]} />}>
+            <Route path={paths.companyDocuments()} element={<CompanyDocumentsPage />} />
+            <Route path={paths.proposalLibrary()} element={<ProposalLibraryPage />} />
+          </Route>
+          <Route element={<RequireRole roles={["Admin", "HOD", "Normal User"]} />}>
+            <Route path={paths.documents()} element={<DocumentsPage />} />
+            <Route path={paths.documentUpload()} element={<DocumentUploadPage />} />
+          </Route>
+          <Route path="*" element={<NotFoundPage />} />
+        </Route>
+      </Route>
+    </>,
   ),
 );
 

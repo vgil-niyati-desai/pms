@@ -6,11 +6,18 @@ cleanup behave identically wherever an upload comes in.
 """
 
 import hashlib
+import logging
 import os
+import re
+import unicodedata
 import uuid
 from typing import Optional
 
 from fastapi import HTTPException
+
+# uvicorn's own error logger, as main.py uses, so a warning from here lands
+# in the same console in the same format as everything else the server says.
+logger = logging.getLogger("uvicorn.error")
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -25,8 +32,54 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_UPLOAD_LABEL = "20 MB"
 
 
-def allowed_file(filename: str) -> bool:
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+MAX_DISPLAY_NAME_LENGTH = 150
+# An extension longer than this is not one, so it gets no protection from the
+# length cap and is cut with the rest of the name.
+_MAX_KEPT_EXTENSION = 16
+
+# Control, format (bidi overrides, zero-width joiners), surrogate, and line or
+# paragraph separator characters. None belongs in a file name, and the bidi
+# ones let `fdp.exe` display as `exe.pdf`.
+_UNSAFE_CATEGORIES = {"Cc", "Cf", "Cs", "Zl", "Zp"}
+
+
+def safe_display_name(name: Optional[str], default: str = "document") -> str:
+    """A client-supplied file name, made safe to store, show and send in a header.
+
+    This is the name people see (`file_name`); the file on disk is always a
+    UUID. It keeps only the last path segment, drops control and Unicode
+    formatting characters, normalises to NFC so the same name always compares
+    equal, trims whitespace and trailing dots, and caps the length while
+    keeping the extension. Legitimate Unicode is left alone. A name with
+    nothing usable left becomes `default`.
+    """
+    if not name:
+        return default
+    name = unicodedata.normalize("NFC", name)
+    segments = [segment for segment in re.split(r"[\\/]", name) if segment.strip()]
+    if not segments:
+        return default
+    name = "".join(
+        char for char in segments[-1] if unicodedata.category(char) not in _UNSAFE_CATEGORIES
+    )
+    name = name.strip().rstrip(". ")
+
+    if len(name) > MAX_DISPLAY_NAME_LENGTH:
+        stem, dot, extension = name.rpartition(".")
+        if dot and stem and len(extension) <= _MAX_KEPT_EXTENSION:
+            keep = MAX_DISPLAY_NAME_LENGTH - len(extension) - 1
+            name = f"{stem[:keep].rstrip()}.{extension}"
+        else:
+            name = name[:MAX_DISPLAY_NAME_LENGTH].rstrip()
+    return name or default
+
+
+def allowed_file(filename: Optional[str]) -> bool:
+    return (
+        bool(filename)
+        and "." in filename
+        and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+    )
 
 
 def upload_path(stored_file_name: str) -> str:
@@ -51,16 +104,41 @@ def hash_file_on_disk(stored_file_name: str) -> Optional[str]:
         return None
 
 
-def remove_stored_file(stored_file_name: Optional[str]) -> None:
-    """Best-effort delete of a stored file; a missing file is not an error."""
+def remove_stored_file(stored_file_name: Optional[str]) -> bool:
+    """Delete a stored file. True when nothing of it is left behind.
+
+    A missing file is not a failure. The database record is the source of
+    truth, and a file that is already gone is the state the caller asked
+    for, so that answers True with nothing said about it.
+
+    Anything else is: no permission, a file another process is holding open
+    (which Windows does to one MuPDF has mapped for a preview or a
+    redaction), a stored name that will not resolve inside UPLOAD_DIR. Each
+    leaves a real file on disk that no record points at any more and nothing
+    in the app will ever look at again -- so it is logged, with the name
+    needed to find it, instead of disappearing silently.
+
+    It is reported rather than raised, because every caller is a cleanup
+    step on a path that has already decided what it is doing: a delete whose
+    record is gone still answers 204, and an upload rolling its file back
+    still reports the error that made it roll back. The return value is for
+    a caller that wants to say more; none has to.
+    """
     if not stored_file_name:
-        return
+        return True
     try:
         os.remove(upload_path(stored_file_name))
-    except (FileNotFoundError, OSError, HTTPException):
-        # The database record is the source of truth. If the file is already
-        # gone (or unreadable), leaving it behind must not fail the request.
-        pass
+    except FileNotFoundError:
+        return True
+    except (OSError, HTTPException) as error:
+        logger.warning(
+            "Could not delete the stored file %s: %s. It is left in the uploads "
+            "folder with no record pointing at it.",
+            stored_file_name,
+            error,
+        )
+        return False
+    return True
 
 
 def write_upload(contents: bytes, original_filename: str) -> str:

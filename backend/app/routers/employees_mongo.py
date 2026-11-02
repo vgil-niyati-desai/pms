@@ -20,7 +20,7 @@ Two shapes live here:
 import math
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -28,10 +28,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pymongo import DESCENDING, ReturnDocument
 from pymongo.collection import Collection
 
-from .. import schemas
+from .. import auth, schemas
 from ..mongodb import get_documents, get_employee_records
+from .documents_mongo import require_document_reference
 
-router = APIRouter(prefix="/employees", tags=["employees"])
+router = APIRouter(
+    prefix="/employees",
+    tags=["employees"],
+    dependencies=[Depends(auth.require_roles("Admin"))],
+)
 
 # The columns the employees list can sort by; anything else falls back to the
 # default rather than erroring, so a stale bookmark still loads.
@@ -82,6 +87,20 @@ MAX_PAGE_SIZE = 200
 # of the skip MongoDB can no longer represent -- which a page like 10**20
 # reached, as a 500. Beyond the last page is still a normal, empty page.
 MAX_PAGE = 100_000
+
+_CERTIFICATE_FILE_STOP_WORDS = {
+    "a",
+    "and",
+    "certificate",
+    "certification",
+    "completion",
+    "for",
+    "of",
+    "on",
+    "the",
+    "to",
+    "training",
+}
 
 
 def _now_utc_ms() -> datetime:
@@ -200,6 +219,21 @@ def _release_document(
     )
 
 
+def _still_referenced(employee: Dict[str, Any], document_id: Optional[str]) -> bool:
+    """Whether any CV or certification the employee now holds names this document.
+
+    Two records of one employee can point at the same file, so removing or
+    re-pointing one of them must not release a file the other still uses.
+    Read from the employee as the write returned it, i.e. with the change
+    already applied.
+    """
+    return any(
+        entry.get("document_id") == document_id
+        for field in ("cvs", "certifications")
+        for entry in employee.get(field) or []
+    )
+
+
 def _nested_document_id(
     employees: Collection, employee_id: str, field: str, item_id: str
 ) -> Optional[str]:
@@ -262,7 +296,151 @@ def _years_since(value: Optional[str], today: str) -> Optional[float]:
     return round(days / DAYS_PER_YEAR, 1)
 
 
-def _serialise(doc: Dict[str, Any], today: Optional[str] = None) -> Dict[str, Any]:
+def _file_match_tokens(value: Optional[str]) -> Set[str]:
+    if not value:
+        return set()
+    stem = re.sub(r"\.[^.]+$", "", value)
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", stem.lower())
+        if token not in _CERTIFICATE_FILE_STOP_WORDS
+    }
+
+
+def _link_certification_documents(
+    employee: Dict[str, Any], employee_documents: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Resolve unlinked certificates from their employee-owned document files.
+
+    The employee import stored the reverse document owner but not the nested
+    certification's pointer. Existing explicit pointers always win; inferred
+    links are returned only when a file name uniquely identifies a certificate,
+    or the employee has exactly one unlinked certificate and one unused file.
+    """
+    certifications = [dict(item) for item in employee.get("certifications") or []]
+    documents = [dict(item) for item in employee_documents]
+    documents_by_id = {str(item["_id"]): item for item in documents}
+
+    for certification in certifications:
+        document_id = certification.get("document_id")
+        document = documents_by_id.get(str(document_id)) if document_id else None
+        if document and not certification.get("file_name"):
+            certification["file_name"] = document.get("file_name")
+
+    available_certifications = [
+        index for index, item in enumerate(certifications) if not item.get("document_id")
+    ]
+    referenced_ids = {
+        str(item.get("document_id"))
+        for item in certifications
+        if item.get("document_id")
+    }
+    available_documents = [
+        index
+        for index, item in enumerate(documents)
+        if str(item.get("_id")) not in referenced_ids and item.get("file_name")
+    ]
+    certification_tokens = {
+        index: _file_match_tokens(certifications[index].get("name"))
+        for index in available_certifications
+    }
+    document_tokens = {
+        index: _file_match_tokens(documents[index].get("file_name"))
+        for index in available_documents
+    }
+
+    while available_certifications and available_documents:
+        scores = {
+            (certification_index, document_index): len(
+                certification_tokens[certification_index]
+                & document_tokens[document_index]
+            )
+            for certification_index in available_certifications
+            for document_index in available_documents
+        }
+        best_for_certification = {}
+        for certification_index in available_certifications:
+            best_score = max(
+                scores[(certification_index, document_index)]
+                for document_index in available_documents
+            )
+            best_for_certification[certification_index] = [
+                document_index
+                for document_index in available_documents
+                if scores[(certification_index, document_index)] == best_score
+                and best_score > 0
+            ]
+        best_for_document = {}
+        for document_index in available_documents:
+            best_score = max(
+                scores[(certification_index, document_index)]
+                for certification_index in available_certifications
+            )
+            best_for_document[document_index] = [
+                certification_index
+                for certification_index in available_certifications
+                if scores[(certification_index, document_index)] == best_score
+                and best_score > 0
+            ]
+
+        matches = [
+            (certification_index, document_index)
+            for certification_index, best_documents in best_for_certification.items()
+            if len(best_documents) == 1
+            for document_index in best_documents
+            if best_for_document[document_index] == [certification_index]
+        ]
+        if not matches:
+            break
+        for certification_index, document_index in matches:
+            certification = certifications[certification_index]
+            document = documents[document_index]
+            certification["document_id"] = str(document["_id"])
+            certification["file_name"] = document.get("file_name")
+            available_certifications.remove(certification_index)
+            available_documents.remove(document_index)
+
+    if len(available_certifications) == len(available_documents) == 1:
+        certification = certifications[available_certifications[0]]
+        document = documents[available_documents[0]]
+        certification["document_id"] = str(document["_id"])
+        certification["file_name"] = document.get("file_name")
+
+    return certifications
+
+
+def _certification_documents_by_employee(
+    employee_records: List[Dict[str, Any]], documents: Collection
+) -> Dict[str, List[Dict[str, Any]]]:
+    employee_ids = [str(record["_id"]) for record in employee_records]
+    if not employee_ids:
+        return {}
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for document in documents.find(
+        {
+            "employee_id": {"$in": employee_ids},
+            "document_type": "Certification",
+        },
+        {"_id": 1, "employee_id": 1, "file_name": 1},
+    ):
+        grouped.setdefault(document["employee_id"], []).append(document)
+    return grouped
+
+
+def _employee_document_records(employee_id: str, documents: Collection) -> List[Dict[str, Any]]:
+    return list(
+        documents.find(
+            {"employee_id": employee_id, "document_type": "Certification"},
+            {"_id": 1, "employee_id": 1, "file_name": 1},
+        )
+    )
+
+
+def _serialise(
+    doc: Dict[str, Any],
+    today: Optional[str] = None,
+    employee_documents: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """Mongo document -> the shape schemas.EmployeeOut expects.
 
     This is where the two experience figures are worked out, because it is the
@@ -274,6 +452,8 @@ def _serialise(doc: Dict[str, Any], today: Optional[str] = None) -> Dict[str, An
     out["id"] = str(doc["_id"])
     out.setdefault("cvs", [])
     out.setdefault("certifications", [])
+    if employee_documents is not None:
+        out["certifications"] = _link_certification_documents(out, employee_documents)
     on = today or _today_utc()
     out["total_experience_years"] = _years_since(doc.get("career_start_date"), on)
     out["vgil_experience_years"] = _years_since(doc.get("date_of_joining"), on)
@@ -472,6 +652,7 @@ def list_certification_index(
     page: int = Query(default=1, ge=1, le=MAX_PAGE),
     page_size: int = Query(default=10, ge=1, le=MAX_PAGE_SIZE),
     employees: Collection = Depends(get_employee_records),
+    documents: Collection = Depends(get_documents),
 ):
     """Every certification held by anyone, one row each.
 
@@ -561,6 +742,27 @@ def list_certification_index(
         row["employee_id"] = str(row.pop("_id"))
         items.append({k: v for k, v in row.items() if not k.startswith("_")})
 
+    owner_ids = {row["employee_id"] for row in items}
+    owner_records = list(
+        employees.find(
+            {"_id": {"$in": [ObjectId(employee_id) for employee_id in owner_ids]}}
+        )
+    )
+    documents_by_employee = _certification_documents_by_employee(owner_records, documents)
+    certification_by_key = {}
+    for owner in owner_records:
+        linked = _link_certification_documents(
+            owner, documents_by_employee.get(str(owner["_id"]), [])
+        )
+        certification_by_key.update(
+            {(str(owner["_id"]), item["id"]): item for item in linked}
+        )
+    for row in items:
+        certification = certification_by_key.get((row["employee_id"], row["id"]))
+        if certification:
+            row["document_id"] = certification.get("document_id")
+            row["file_name"] = certification.get("file_name")
+
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
@@ -581,6 +783,7 @@ def list_employees(
     page: int = Query(default=1, ge=1, le=MAX_PAGE),
     page_size: int = Query(default=10, ge=1, le=MAX_PAGE_SIZE),
     employees: Collection = Depends(get_employee_records),
+    documents: Collection = Depends(get_documents),
 ):
     """One page of employees, filtered and sorted.
 
@@ -645,22 +848,32 @@ def list_employees(
 
     # One `today` for the whole page, so two rows of the same list can never
     # be computed against different days.
-    items = [_serialise(doc, today) for doc in employees.aggregate(pipeline)]
+    records = list(employees.aggregate(pipeline))
+    documents_by_employee = _certification_documents_by_employee(records, documents)
+    items = [
+        _serialise(doc, today, documents_by_employee.get(str(doc["_id"]), []))
+        for doc in records
+    ]
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 @router.get("/{employee_id}", response_model=schemas.EmployeeOut)
-def get_employee(employee_id: str, employees: Collection = Depends(get_employee_records)):
+def get_employee(
+    employee_id: str,
+    employees: Collection = Depends(get_employee_records),
+    documents: Collection = Depends(get_documents),
+):
     record = employees.find_one({"_id": _object_id(employee_id)})
     if not record:
         raise HTTPException(status_code=404, detail="Employee not found")
-    return _serialise(record)
+    return _serialise(record, employee_documents=_employee_document_records(employee_id, documents))
 
 
 @router.post("/", response_model=schemas.EmployeeOut, status_code=201)
 def create_employee(
     payload: schemas.EmployeeIn,
     employees: Collection = Depends(get_employee_records),
+    documents: Collection = Depends(get_documents),
 ):
     now = _now_utc_ms()
     record = payload.model_dump()
@@ -671,7 +884,10 @@ def create_employee(
 
     result = employees.insert_one(record)
     record["_id"] = result.inserted_id
-    return _serialise(record)
+    return _serialise(
+        record,
+        employee_documents=_employee_document_records(str(record["_id"]), documents),
+    )
 
 
 @router.put("/{employee_id}", response_model=schemas.EmployeeOut)
@@ -679,6 +895,7 @@ def update_employee(
     employee_id: str,
     payload: schemas.EmployeeIn,
     employees: Collection = Depends(get_employee_records),
+    documents: Collection = Depends(get_documents),
 ):
     """Replace the profile fields.
 
@@ -688,6 +905,9 @@ def update_employee(
     keeps document_ids off a project's PUT.
     """
     changes = payload.model_dump()
+    for field in ("company", "education"):
+        if field not in payload.model_fields_set:
+            changes.pop(field)
     changes["updated_at"] = _now_utc_ms()
 
     updated = employees.find_one_and_update(
@@ -697,7 +917,10 @@ def update_employee(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Employee not found")
-    return _serialise(updated)
+    return _serialise(
+        updated,
+        employee_documents=_employee_document_records(employee_id, documents),
+    )
 
 
 @router.delete("/{employee_id}", status_code=204)
@@ -742,9 +965,10 @@ def _add_nested(
     field: str,
     values: Dict[str, Any],
 ) -> Dict[str, Any]:
-    # Before the push, so a document another employee holds is refused with
-    # nothing written on either side.
+    # Before the push, so a document that does not exist, or that another
+    # employee holds, is refused with nothing written on either side.
     document_id = values.get("document_id")
+    require_document_reference(documents, document_id)
     _check_document_claim(documents, document_id, employee_id)
 
     item = dict(values)
@@ -762,7 +986,10 @@ def _add_nested(
     # After the push, so an employee that turned out not to exist cannot
     # leave a document stamped with their id.
     _claim_document(documents, document_id, employee_id)
-    return _serialise(updated)
+    return _serialise(
+        updated,
+        employee_documents=_employee_document_records(employee_id, documents),
+    )
 
 
 def _update_nested(
@@ -774,11 +1001,14 @@ def _update_nested(
     values: Dict[str, Any],
 ) -> Dict[str, Any]:
     document_id = values.get("document_id")
-    _check_document_claim(documents, document_id, employee_id)
     # Read before the write, because afterwards nothing is left to say which
     # document this record used to point at. Replacing a CV's file reuses the
     # same document, so these are normally equal and nothing is released.
     previous_document_id = _nested_document_id(employees, employee_id, field, item_id)
+    # Saving an unchanged pointer back is allowed even if its document has
+    # since been deleted; a pointer being set has to resolve.
+    require_document_reference(documents, document_id, previous_document_id)
+    _check_document_claim(documents, document_id, employee_id)
 
     # The positional $ writes into the array element the query matched, field
     # by field, which is what preserves the item's id and created_at.
@@ -795,10 +1025,17 @@ def _update_nested(
         # being edited is not there.
         raise HTTPException(status_code=404, detail="Record not found")
 
-    if previous_document_id and previous_document_id != document_id:
+    if (
+        previous_document_id
+        and previous_document_id != document_id
+        and not _still_referenced(updated, previous_document_id)
+    ):
         _release_document(documents, previous_document_id, employee_id)
     _claim_document(documents, document_id, employee_id)
-    return _serialise(updated)
+    return _serialise(
+        updated,
+        employee_documents=_employee_document_records(employee_id, documents),
+    )
 
 
 def _remove_nested(
@@ -819,9 +1056,14 @@ def _remove_nested(
         raise HTTPException(status_code=404, detail="Record not found")
 
     # The file stays in the log — deleting it is the caller's own,
-    # separate call — but it is no longer this employee's.
-    _release_document(documents, document_id, employee_id)
-    return _serialise(updated)
+    # separate call — but it is no longer this employee's, unless another of
+    # their records still points at it.
+    if not _still_referenced(updated, document_id):
+        _release_document(documents, document_id, employee_id)
+    return _serialise(
+        updated,
+        employee_documents=_employee_document_records(employee_id, documents),
+    )
 
 
 @router.post("/{employee_id}/cvs", response_model=schemas.EmployeeOut, status_code=201)

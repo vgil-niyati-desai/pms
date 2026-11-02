@@ -11,6 +11,7 @@ export default function ConfirmDelete({
   confirmLabel = "Delete entry",
   busyLabel = "Deleting...",
   busy = false,
+  confirmDisabled = false,
   error = null,
   onConfirm,
   onCancel,
@@ -21,7 +22,12 @@ export default function ConfirmDelete({
       {children}
       {error && <div className="alert alert-error">{error}</div>}
       <div className="form-actions">
-        <button type="button" className="btn btn-danger" onClick={onConfirm} disabled={busy}>
+        <button
+          type="button"
+          className="btn btn-danger"
+          onClick={onConfirm}
+          disabled={busy || confirmDisabled}
+        >
           {busy ? busyLabel : confirmLabel}
         </button>
         <button type="button" className="btn" onClick={onCancel} disabled={busy}>

@@ -21,11 +21,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pymongo import DESCENDING, ReturnDocument
 from pymongo.collection import Collection
 
-from .. import schemas
+from .. import auth, schemas
 from ..mongodb import get_documents, get_project_records, get_tender_records
 from .documents_mongo import serialise_document
 
-router = APIRouter(prefix="/projects", tags=["projects"])
+router = APIRouter(
+    prefix="/projects",
+    tags=["projects"],
+    dependencies=[Depends(auth.require_roles("Admin"))],
+)
 
 # The columns the list screen can sort by. Anything else falls back to the
 # default rather than erroring: a stale bookmark should still load the list.

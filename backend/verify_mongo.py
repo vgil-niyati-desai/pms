@@ -1613,10 +1613,15 @@ def run_suite(collection):
     """Drive every documents endpoint against `collection`."""
     from fastapi.testclient import TestClient
 
-    from app import main, mongodb
+    from app import auth, main, mongodb
     from app.routers import documents_mongo
 
     # Point both the request path and the startup path at this collection.
+    main.app.dependency_overrides[auth.require_user] = lambda: {
+        "id": "verification",
+        "username": "verification",
+        "role": "Admin",
+    }
     main.app.dependency_overrides[mongodb.get_documents] = lambda: collection
     # DELETE /documents/{id} now also clears the reference a tender holds, so
     # the tenders collection is pointed at this suite's own database too.
