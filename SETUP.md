@@ -54,6 +54,7 @@ procurement-management-system/
 │   ├── migrate.py           migration runner
 │   ├── import_company_documents.py   bulk import of company documents (3g)
 │   ├── import_proposal_library.py    bulk import of proposal write-ups (3h)
+│   ├── import_tender_documents.py    bulk import of tenders and their documents (3i)
 │   ├── verify_*.py          older end-to-end checks of each area's endpoints
 │   ├── diagnose_detection.py  explains why a figure was or was not suggested (3f)
 │   ├── run.ps1              Windows launcher that uses the venv's Python
@@ -1118,6 +1119,36 @@ trailing number in the file name becomes the point number. Per file it reports
 (the file is not a valid `.docx`/`.rtf`); other file types are ignored and
 counted. It is safe to repeat, deletes nothing, and writes a report to an
 `import_reports/` folder next to `SOURCE_DIR`. Take a backup first.
+
+## 3i. Importing tender documents
+
+`backend/import_tender_documents.py` loads tenders together with the documents
+that belong to them, into the structure the Tenders screens already use. No
+data is stored in this repository.
+
+`python import_tender_documents.py PACKAGE_DIR --confirm-db NAME [--dry-run]`,
+from `backend/`. `PACKAGE_DIR` holds a `manifest.json` and the files it names
+(keep the original file names). The manifest lists tenders; each has `fields`
+(title, issuing authority, reference number, type, published date, submission
+deadline, submission mode, fee, value, EMD, status, notes, tags) and its
+`documents` (file, original name, SHA-256, document type, category, reference
+number, document date, notes). Put in only what the documents state: anything
+left out is stored empty, and the tender fields are validated by the same
+rules as the tender form.
+
+Keep the two kinds of document apart by type: what the client issued (for
+example *Tender Document*) is not what VGIL submitted (*Submitted Bid*,
+*Technical Proposal*, *Financial Proposal*), and the notes should say which.
+
+Per tender it reports *created* or *existing* (matched on issuing authority
+plus reference number; an existing tender is never changed). Per document it
+reports *inserted*, *linked* (the file was already in the log and free of any
+other owner), *skipped* (already attached to this tender, or owned by
+something else, which is left as it is) or *failed* (missing file, hash
+mismatch, unsupported type, over the 20 MB upload limit). It is safe to repeat,
+deletes nothing, and writes a report to `PACKAGE_DIR/reports/`. Files the
+document log does not accept (Word, Excel) or above the limit cannot be
+imported by it. Take a backup first.
 
 ## Migrations at a glance
 

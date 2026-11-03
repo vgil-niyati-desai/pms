@@ -193,7 +193,7 @@ backend/
   tests/              unittest suites (mongomock)
   ocr/tessdata/       OCR language data
   migrate.py          migration runner (--status, --dry-run, --force)
-  import_company_documents.py, import_proposal_library.py
+  import_company_documents.py, import_proposal_library.py, import_tender_documents.py
                       bulk-import tools for operators (see SETUP.md)
   verify_*.py         older end-to-end checks
   diagnose_detection.py  shows why the detector did or did not suggest a figure
