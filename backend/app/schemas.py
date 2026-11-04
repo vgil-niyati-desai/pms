@@ -1599,6 +1599,9 @@ class ProposalItemOut(ProposalItemRow):
     requirement_text: Optional[str] = None
     response_text: Optional[str] = None
     source_path: Optional[str] = None
+    # OCR of embedded screenshots; separate from the write-up's own text.
+    image_text: Optional[str] = None
+    image_ocr: Optional[Dict[str, Any]] = None
 
 
 class ProposalItemIn(ProposalItemFields):

@@ -75,6 +75,7 @@ procurement-management-system/
     ├── google_drive_readonly.py  lists Drive metadata after browser OAuth
     ├── llmthing_ocr.py           optional OCR helper for scanned certificates (3g)
     ├── build_company_package.py  builds a company-document import package (3g)
+    ├── build_tender_package.py   builds a tender-documents import package (3i)
     └── pdf_splitter/  splits a combined PDF using an Excel index
 ```
 
@@ -1076,9 +1077,17 @@ hash, so a file is never sent twice; pages that already have text are read
 directly. It needs a token in a file whose path is in the
 `LLMTHING_TOKEN_FILE` environment variable (never printed or stored), and
 optionally `LLMTHING_BASE_URL` and `LLMTHING_MODEL`. It is an operator tool run
-on a workstation; the server never needs it. OCR can misread long identifiers
-(certificate and registration numbers) — compare them with the document itself
-before putting them in the metadata file.
+on a workstation; the server never needs it.
+
+It is resumable (pages are cached as they are read, so a run that stops
+part-way continues from the next page) and it never falls back to another OCR
+service: a page LLMThing cannot read marks that file as failed in `--log FILE`
+(one JSON line per file) and in the exit status, and the run carries on with
+the next file. `--max-pages N` reads only the first N pages of each file.
+
+OCR text is good for describing a document but can misread **identifiers and
+dates** — reference numbers, certificate numbers, issue and closing dates. Put
+such a value in the metadata only after checking it against the page image.
 
 ## 3h. Proposal Library
 
@@ -1091,16 +1100,24 @@ projects and employees.
 
 - **What is stored:** the original `.docx` or `.rtf` (kept for download) and
   its extracted text, split on the pattern every sampled file follows: the
-  first paragraph is the requirement and the rest is the response. The split
+  first paragraph (with any bullet items directly under it) is the requirement
+  and the rest is the response. The split
   is a heuristic, so both texts can be corrected in the edit form. Pictures in
   a write-up are counted but not shown in the app; download the original to see
-  them. RTF text is stripped of its formatting rather than fully parsed.
-- **Screen:** search over requirement and response text, filters by part
+  them. RTF files are read by a structural parser (style tables, headers and picture
+  data are skipped); text formatting is not kept.
+- **Screen:** a **View** button opens the original in a read-only viewer
+  (paragraphs, bold/italic, lists, tables and pictures, with the page header
+  and footer shown above and below as in the downloaded file; page layout is
+  not reproduced, and an `.rtf` shows text only) before anything is downloaded; search
+  over requirement and response text, filters by part
   (first number of the section), section, file type and pictures, sort by
   section number (numerically: 3.2 before 3.10), a reading drawer with a
   **Copy response** button, and add / edit / delete.
 - **Endpoints:** `GET/POST /proposal-library/`, `GET /proposal-library/sections`,
-  `GET/PUT/DELETE /proposal-library/{id}`, `GET /proposal-library/{id}/file`.
+  `GET/PUT/DELETE /proposal-library/{id}`, `GET /proposal-library/{id}/file`
+  (download) and `GET /proposal-library/{id}/preview` (the original as read-only
+  HTML for the in-app viewer).
   Uploads accept `.docx` and `.rtf` only, up to the same 20 MB limit; the
   document log's PDF/PNG/JPG-only rule is unchanged.
 - **Access:** Admin and HOD. Normal Users have no access.
@@ -1110,15 +1127,18 @@ projects and employees.
 
 ### Bulk import
 
-`python import_proposal_library.py SOURCE_DIR --confirm-db NAME [--dry-run]`,
+`python import_proposal_library.py SOURCE_DIR --confirm-db NAME [--dry-run] [--limit N]`,
 from `backend/`. `SOURCE_DIR` is a folder whose sub-folders are the sections
 (for example `3.3.7 Loan account management`); the section number and title
 are read from the folder name, a deeper folder becomes the subsection, and a
 trailing number in the file name becomes the point number. Per file it reports
 *inserted*, *skipped* (the same bytes are already in the library) or *failed*
 (the file is not a valid `.docx`/`.rtf`); other file types are ignored and
-counted. It is safe to repeat, deletes nothing, and writes a report to an
-`import_reports/` folder next to `SOURCE_DIR`. Take a backup first.
+counted. `--limit N` takes only the first N files (folder path order, then file
+name) for a pilot batch; it also lists metadata the files did not supply
+(left empty, never guessed). It is safe to repeat, deletes nothing, and writes
+a report to an `import_reports/` folder next to `SOURCE_DIR`. Take a backup
+first.
 
 ## 3i. Importing tender documents
 
@@ -1135,6 +1155,23 @@ deadline, submission mode, fee, value, EMD, status, notes, tags) and its
 number, document date, notes). Put in only what the documents state: anything
 left out is stored empty, and the tender fields are validated by the same
 rules as the tender form.
+
+To build the package from a folder of bids use `scripts/build_tender_package.py`
+(`--source ROOT --bids FILE --ocr-cache DIR [--ocr-log FILE] --out DIR`). The
+curated `--bids` list gives, per bid folder, the tender fields and, per file,
+its `kind` (`client`, `vgil` or `other`), `document_type` and a one-line
+`what`; the builder hashes and copies each file, attaches OCR text for scanned
+ones, and writes `processing_log.json` saying, per file, whether it was
+packaged and anything incomplete about it (a scan with no OCR result, over the
+size limit, a type the store does not accept, image-only pages, no reference or
+date). A file in a bid folder that the list does not mention is logged as
+`unclassified` and left out.
+
+The application's upload rules (PDF/PNG/JPG, 20 MB) apply to this importer too.
+A bulk load of bid files that legitimately break them is opt-in per run:
+`--max-mb N` raises the size limit and `--allow-ext docx,xlsx` accepts Word and
+Excel files. Word and Excel records download normally; the app shows "No
+preview for this file type" for them.
 
 Keep the two kinds of document apart by type: what the client issued (for
 example *Tender Document*) is not what VGIL submitted (*Submitted Bid*,

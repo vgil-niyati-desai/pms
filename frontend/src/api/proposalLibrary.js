@@ -25,6 +25,11 @@ export async function getProposalItem(id) {
   return requestJson(`/proposal-library/${id}`, { fallback: "Failed to load the write-up" });
 }
 
+/** The stored original as an HTML fragment: `{ html, fidelity }` ("formatted" for .docx, "text" for .rtf). */
+export async function getProposalPreview(id) {
+  return requestJson(`/proposal-library/${id}/preview`, { fallback: "Failed to load the document preview" });
+}
+
 export function proposalFileUrl(id) {
   return `${API_BASE_URL}/proposal-library/${id}/file`;
 }

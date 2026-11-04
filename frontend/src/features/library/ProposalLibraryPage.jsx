@@ -3,6 +3,7 @@ import {
   createProposalItem,
   deleteProposalItem,
   getProposalItem,
+  getProposalPreview,
   listProposalItems,
   listProposalSections,
   proposalFileUrl,
@@ -19,6 +20,7 @@ import FilterChips from "../../components/FilterChips";
 import FormRow from "../../components/FormRow";
 import Pagination from "../../components/Pagination";
 import SearchInput from "../../components/SearchInput";
+import SegmentedControl from "../../components/SegmentedControl";
 import TagChip from "../../components/TagChip";
 import useHandoffNotice from "../../hooks/useHandoffNotice";
 import usePageRecovery, { wholePage } from "../../hooks/usePageRecovery";
@@ -44,9 +46,49 @@ const EMPTY_FORM = {
 const formFrom = (item) =>
   Object.fromEntries(Object.keys(EMPTY_FORM).map((key) => [key, item?.[key] ?? EMPTY_FORM[key]]));
 
+const FRAME_STYLE =
+  "body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:1.55;color:#1f2937;margin:16px 20px}" +
+  "p{margin:0 0 10px}ul,ol{margin:0 0 10px;padding-left:24px}h3,h4{margin:14px 0 8px}" +
+  "table{border-collapse:collapse;margin:0 0 10px}td{border:1px solid #cbd5e1;padding:4px 8px;vertical-align:top}";
+
+/** The original file rendered read-only, so it can be read before it is downloaded.
+ *  Shown in a sandboxed frame (no scripts, no navigation) as defence in depth. */
+function DocumentView({ item }) {
+  const [state, setState] = useState({ status: "loading" });
+  useEffect(() => {
+    let cancelled = false;
+    setState({ status: "loading" });
+    getProposalPreview(item.id)
+      .then((preview) => !cancelled && setState({ status: "ready", ...preview }))
+      .catch((err) => !cancelled && setState({ status: "error", message: err.message }));
+    return () => {
+      cancelled = true;
+    };
+  }, [item.id]);
+
+  if (state.status === "loading") return <p className="muted" role="status">Loading the document…</p>;
+  if (state.status === "error") {
+    return <p className="field-error" role="alert">{state.message || "The document could not be previewed."}</p>;
+  }
+  return (
+    <>
+      <iframe
+        title={`Document: ${item.file_name || "write-up"}`}
+        sandbox=""
+        className="document-frame"
+        srcDoc={`<!doctype html><meta charset="utf-8"><style>${FRAME_STYLE}</style>${state.html}`}
+      />
+      {state.fidelity === "text" && (
+        <p className="muted">Only the text of an .rtf file is shown; download the original to see its formatting.</p>
+      )}
+    </>
+  );
+}
+
 /** The write-up as it reads: requirement, then the answer, with a copy button. */
 function Reading({ item }) {
   const [copied, setCopied] = useState(false);
+  const [view, setView] = useState(item.has_file ? "document" : "text");
   async function copy() {
     try {
       await navigator.clipboard.writeText(item.response_text || "");
@@ -63,10 +105,24 @@ function Reading({ item }) {
         {item.subsection ? ` › ${item.subsection}` : ""}
         {item.point_number !== null && item.point_number !== undefined ? ` · point ${item.point_number}` : ""}
       </p>
-      <h3>Requirement</h3>
-      <p style={{ whiteSpace: "pre-wrap" }}>{dash(item.requirement_text)}</p>
-      <h3>Response</h3>
-      <p style={{ whiteSpace: "pre-wrap" }}>{dash(item.response_text)}</p>
+      {item.has_file && (
+        <SegmentedControl
+          label="How to read this write-up"
+          value={view}
+          onChange={setView}
+          options={[{ key: "document", label: "Document" }, { key: "text", label: "Extracted text" }]}
+        />
+      )}
+      {view === "document" && item.has_file ? (
+        <DocumentView item={item} />
+      ) : (
+        <>
+          <h3>Requirement</h3>
+          <p style={{ whiteSpace: "pre-wrap" }}>{dash(item.requirement_text)}</p>
+          <h3>Response</h3>
+          <p style={{ whiteSpace: "pre-wrap" }}>{dash(item.response_text)}</p>
+        </>
+      )}
       <div className="preview-toolbar">
         <button type="button" className="btn btn-sm" onClick={copy} disabled={!item.response_text}>
           {copied ? "Copied" : "Copy response"}
@@ -79,7 +135,7 @@ function Reading({ item }) {
       </div>
       <p className="muted">
         {item.image_count
-          ? `The original contains ${item.image_count} picture${item.image_count === 1 ? "" : "s"}, which are not shown here; download it to see them.`
+          ? `The original contains ${item.image_count} picture${item.image_count === 1 ? "" : "s"} (for example logos in its header), which the viewer does not show; download it to see them.`
           : "The original contains no pictures."}
       </p>
     </section>
@@ -336,6 +392,11 @@ export default function ProposalLibraryPage() {
       className: "cell-tight",
       render: (r) => (
         <div className="row-actions">
+          {r.has_file && (
+            <button type="button" className="btn btn-sm" onClick={() => openItem(r)}>
+              View
+            </button>
+          )}
           {r.has_file && (
             <a className="btn btn-sm" href={proposalFileUrl(r.id)}>
               Download

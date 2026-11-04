@@ -147,3 +147,7 @@ backups/
 import_reports/
 ocr_cache/
 *.token
+
+# Data packages and MongoDB exports: never commit these.
+*.tgz
+*.bson

@@ -146,6 +146,109 @@ class TenderDocumentImportTests(unittest.TestCase):
         self.assertEqual(counts, {"tender failed": 1})  # the app's own date rule applies
         self.assertEqual(self.tenders.count_documents({}), 1)
 
+    def test_a_bid_without_a_reference_is_matched_on_authority_and_title(self):
+        fields = {"title": "Proposal for Test Bank", "issuing_authority": "Test Bank", "tags": ["Testland"]}
+        self.package_with((fields, [("a.pdf", "first", {"document_type": "Submitted Bid"})]))
+        _, counts = self.run_import()
+        self.assertEqual(counts, {"tender created": 1, "document inserted": 1})
+        # a later batch adds a second file to the same bid (appended to the package, so a.pdf is unchanged)
+        extra = pdf_bytes("second")
+        with open(os.path.join(self.package.name, "files/0/b.pdf"), "wb") as handle:
+            handle.write(extra)
+        manifest_path = os.path.join(self.package.name, "manifest.json")
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        manifest["tenders"][0]["documents"].append({
+            "file": "files/0/b.pdf", "original_name": "b.pdf", "sha256": hashlib.sha256(extra).hexdigest(),
+            "document_type": "Financial Proposal"})
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle)
+        _, counts = self.run_import()
+        self.assertEqual(counts, {"tender existing": 1, "document skipped": 1, "document inserted": 1})
+        self.assertEqual(self.tenders.count_documents({}), 1)  # not a second tender
+        self.assertEqual(len(self.tenders.find_one({})["document_ids"]), 2)  # new file joined the same one
+
+    def test_size_and_type_limits_default_to_the_apps_and_are_opt_in(self):
+        self.package_with((self.FIELDS, [("Sheet.xlsx", "x", {"document_type": "Other"})]))
+        os.replace(os.path.join(self.package.name, "files/0/Sheet.xlsx"), os.path.join(self.package.name, "files/0/Sheet.xlsx"))
+        results, counts = self.run_import()
+        self.assertEqual(counts, {"tender created": 1, "document failed": 1})
+        self.assertIn("not accepted", results[-1]["detail"])
+        # opt in to the type: accepted, stored under its original name
+        results = importer.import_manifest(self.package.name, self.tenders, self.documents, extra_ext={"xlsx"})
+        self.assertEqual([r["status"] for r in results if r["kind"] == "document"], ["inserted"])
+        # a file over the run's limit is refused with the limit named
+        self.documents.delete_many({})
+        self.tenders.delete_many({})
+        results = importer.import_manifest(self.package.name, self.tenders, self.documents, max_bytes=10, extra_ext={"xlsx"})
+        self.assertIn("upload limit for this run", [r for r in results if r["kind"] == "document"][0]["detail"])
+
+    def test_ocr_text_travels_with_a_newly_inserted_document(self):
+        self.package_with((self.FIELDS, [("Scan.pdf", "scan", {"document_type": "Tender Notice"})]))
+        manifest_path = os.path.join(self.package.name, "manifest.json")
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        manifest["tenders"][0]["documents"][0]["extraction"] = {
+            "methods": ["ocr"], "pages": [{"page": 1, "method": "ocr", "text": "Closing date 6 August"}]}
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle)
+        self.run_import()
+        document = self.documents.find_one({})
+        self.assertEqual(document["extraction_methods"], ["ocr"])
+        self.assertIn("Closing date 6 August", document["extracted_text"])
+
+    def _enrich(self, **extra_fields):
+        """Re-write the package manifest with richer metadata for the same files."""
+        path = os.path.join(self.package.name, "manifest.json")
+        with open(path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        entry = manifest["tenders"][0]
+        entry["fields"].update(extra_fields)
+        entry["documents"][0].update({"category": "Core Banking System", "document_date": "2026-01-16",
+                                      "notes": "Client-issued RFP, richer description."})
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle)
+
+    def test_update_fills_and_corrects_but_never_clears_and_is_idempotent(self):
+        self.package_with((self.FIELDS, [self.DOC]))
+        self.run_import()
+        self._enrich(tender_fee="560", status="Submitted", tags=["Testland", "Core Banking"], submission_deadline="")
+        # without --update nothing is touched
+        _, counts = self.run_import()
+        self.assertEqual(counts, {"tender existing": 1, "document skipped": 1})
+        self.assertIsNone(self.tenders.find_one({})["tender_fee"])
+
+        results = importer.import_manifest(self.package.name, self.tenders, self.documents, update=True)
+        statuses = sorted((r["kind"], r["status"]) for r in results)
+        self.assertEqual(statuses, [("document", "updated"), ("tender", "updated")])
+        tender, document = self.tenders.find_one({}), self.documents.find_one({})
+        self.assertEqual((tender["tender_fee"], tender["status"], tender["tags"]),
+                         ("560", "Submitted", ["Testland", "Core Banking"]))
+        self.assertEqual(tender["submission_deadline"], "2026-03-01")  # an empty manifest value never clears
+        self.assertEqual((document["category"], document["document_date"]), ("Core Banking System", "2026-01-16"))
+        self.assertEqual(len(tender["document_ids"]), 1)  # no new records, nothing re-attached
+        self.assertEqual((self.tenders.count_documents({}), self.documents.count_documents({})), (1, 1))
+
+        again = importer.import_manifest(self.package.name, self.tenders, self.documents, update=True)
+        self.assertEqual(sorted((r["kind"], r["status"]) for r in again), [("document", "skipped"), ("tender", "existing")])
+
+    def test_update_does_not_touch_a_document_this_tool_did_not_import(self):
+        self.package_with((self.FIELDS, [self.DOC]))
+        self.run_import()
+        self.documents.update_one({}, {"$set": {"submitted_by": "A. Person", "notes": "written by hand"}})
+        self._enrich()
+        results = importer.import_manifest(self.package.name, self.tenders, self.documents, update=True)
+        self.assertEqual([r["status"] for r in results if r["kind"] == "document"], ["skipped"])
+        self.assertEqual(self.documents.find_one({})["notes"], "written by hand")
+
+    def test_update_dry_run_writes_nothing(self):
+        self.package_with((self.FIELDS, [self.DOC]))
+        self.run_import()
+        self._enrich(tender_fee="560")
+        results = importer.import_manifest(self.package.name, self.tenders, self.documents, dry_run=True, update=True)
+        self.assertEqual(sorted(r["status"] for r in results), ["updated", "updated"])
+        self.assertIsNone(self.tenders.find_one({})["tender_fee"])
+
 
 if __name__ == "__main__":
     unittest.main()

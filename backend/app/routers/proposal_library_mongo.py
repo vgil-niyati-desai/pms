@@ -20,7 +20,7 @@ from pymongo import ReturnDocument
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
-from .. import auth, docx_text, proposal_library, redaction, schemas, storage
+from .. import auth, docx_html, docx_text, proposal_library, redaction, schemas, storage
 from ..mongodb import get_proposal_library
 from . import documents_mongo as log
 
@@ -35,7 +35,7 @@ MEDIA_TYPES = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "rtf": "application/rtf",
 }
-_LONG_FIELDS = ("requirement_text", "response_text", "source_path")
+_LONG_FIELDS = ("requirement_text", "response_text", "source_path", "image_text")
 
 
 def _oid(item_id: str) -> ObjectId:
@@ -58,6 +58,7 @@ def _full(doc: Dict[str, Any]) -> Dict[str, Any]:
     out = _row(doc)
     for field in _LONG_FIELDS:
         out[field] = doc.get(field)
+    out["image_ocr"] = doc.get("image_ocr")
     return out
 
 
@@ -113,7 +114,7 @@ def list_items(
                 "$or": [
                     {field: pattern}
                     for field in (
-                        "title", "requirement_text", "response_text", "section_title",
+                        "title", "requirement_text", "response_text", "image_text", "section_title",
                         "section_number", "subsection", "file_name",
                     )
                 ]
@@ -180,6 +181,24 @@ def download_file(item_id: str, items: Collection = Depends(get_proposal_library
             )
         },
     )
+
+
+@router.get("/{item_id}/preview")
+def preview_file(item_id: str, items: Collection = Depends(get_proposal_library)):
+    """The stored original as an HTML fragment (for the in-app viewer), so a
+    write-up can be read before it is downloaded. Read-only; nothing is written."""
+    doc = items.find_one({"_id": _oid(item_id)})
+    if not doc or not doc.get("stored_file_name"):
+        raise HTTPException(status_code=404, detail="No file for this write-up")
+    path = storage.upload_path(doc["stored_file_name"])
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File missing on server")
+    with open(path, "rb") as handle:
+        contents = handle.read()
+    try:
+        return docx_html.render(contents, doc.get("file_type") or "")
+    except docx_text.UnreadableDocument as error:
+        raise HTTPException(status_code=422, detail="This file cannot be previewed: %s" % error)
 
 
 @router.post("/", response_model=schemas.ProposalItemOut, status_code=201)

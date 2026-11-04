@@ -2190,6 +2190,17 @@ img.file-preview-fill {
   text-align: center;
 }
 
+/* A write-up's original, rendered read-only inside the library drawer. */
+.document-frame {
+  display: block;
+  width: 100%;
+  height: min(62vh, 640px);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  margin-bottom: 12px;
+}
+
 /* The two things a drawer offers besides the preview itself. */
 .preview-toolbar {
   display: flex;

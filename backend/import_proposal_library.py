@@ -19,6 +19,11 @@ the database in use, and needs the unique source_key index from migration
   failed    the file is not what its extension says (for example a ".docx"
             that is not a Word document); nothing is written for it.
 
+Screenshots inside a .docx are read by local OCR into `image_text` (kept apart from
+the write-up's own text); --no-ocr turns that off. Files already in the library are
+never touched, so they get no OCR text from a later run.
+
+--limit N processes only the first N files in sorted order (a pilot batch).
 Files other than .docx/.rtf are ignored and counted. A report is written to
 SOURCE_DIR's parent under import_reports/.
 """
@@ -39,8 +44,22 @@ def _now():
     return now.replace(microsecond=(now.microsecond // 1000) * 1000)
 
 
-def import_folder(source_dir, items, dry_run=False):
-    results, ignored = [], 0
+def _gaps(record):
+    """Metadata the file and its folder did not supply; reported, never filled in."""
+    gaps = []
+    for field in ("section_number", "section_title", "point_number", "requirement_text", "response_text"):
+        if record.get(field) in (None, ""):
+            gaps.append("no " + field)
+    if record["word_count"] == 0:
+        gaps.append("no text extracted")
+    return gaps
+
+
+def import_folder(source_dir, items, dry_run=False, limit=None, ocr=True):
+    """limit: stop after this many .docx/.rtf files, taken in the order the
+    sections and files sort (folder path, then file name). Files already in the
+    library count towards it, so the same limit always means the same files."""
+    results, ignored, seen = [], 0, 0
     source_dir = os.path.abspath(source_dir)
     for folder, _, names in sorted(os.walk(source_dir)):
         relative = os.path.relpath(folder, source_dir).replace("\\", "/")
@@ -54,11 +73,14 @@ def import_folder(source_dir, items, dry_run=False):
             if extension not in schemas.PROPOSAL_FILE_TYPES:
                 ignored += 1
                 continue
+            if limit is not None and seen >= limit:
+                continue
+            seen += 1
             path = os.path.join(folder, name)
             source_path = relative + "/" + name
 
-            def log(status, detail=""):
-                results.append({"status": status, "file": source_path, "detail": detail})
+            def log(status, detail="", gaps=()):
+                results.append({"status": status, "file": source_path, "detail": detail, "missing": list(gaps)})
 
             with open(path, "rb") as handle:
                 contents = handle.read()
@@ -67,16 +89,17 @@ def import_folder(source_dir, items, dry_run=False):
                     contents, name,
                     section_number=section_number, section_title=section_title,
                     subsection=subsection, point_number=docx_text.parse_point_number(name),
-                    source_path=source_path, created_at=_now(),
+                    source_path=source_path, created_at=_now(), ocr=ocr,
                 )
             except docx_text.UnreadableDocument as error:
                 log("failed", "could not be read: %s" % error)
                 continue
+            gaps = _gaps(record)
             if items.find_one({"source_key": record["source_key"]}):
-                log("skipped", "already in the library")
+                log("skipped", "already in the library", gaps)
                 continue
             if dry_run:
-                log("inserted", "dry run: would insert")
+                log("inserted", "dry run: would insert", gaps)
                 continue
             record["stored_file_name"] = storage.write_upload(contents, name)
             try:
@@ -89,7 +112,7 @@ def import_folder(source_dir, items, dry_run=False):
                 storage.remove_stored_file(record["stored_file_name"])
                 log("failed", "%s: %s" % (type(error).__name__, error))
                 continue
-            log("inserted")
+            log("inserted", "", gaps)
     return results, ignored
 
 
@@ -98,6 +121,8 @@ def main():
     parser.add_argument("source")
     parser.add_argument("--confirm-db", required=True, help="must equal the database in use")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-ocr", action="store_true", help="do not read text out of embedded screenshots")
+    parser.add_argument("--limit", type=int, help="process only the first N .docx/.rtf files (sorted by folder, then name)")
     args = parser.parse_args()
     if args.confirm_db != mongodb.MONGO_DB_NAME:
         sys.exit("Refusing to run: --confirm-db is %r but MONGO_DB_NAME is %r."
@@ -112,7 +137,7 @@ def main():
                  "(python migrate.py), then run this again.")
     print("database: %s / %s%s" % (mongodb.safe_uri(), mongodb.MONGO_DB_NAME, "  (DRY RUN)" if args.dry_run else ""))
     print("uploads : %s" % storage.UPLOAD_DIR)
-    results, ignored = import_folder(args.source, items, args.dry_run)
+    results, ignored = import_folder(args.source, items, args.dry_run, args.limit, ocr=not args.no_ocr)
     counts = {}
     for row in results:
         counts[row["status"]] = counts.get(row["status"], 0) + 1
@@ -127,6 +152,11 @@ def main():
         with open(os.path.join(folder, "proposal_library_%s.json" % stamp), "w", encoding="utf-8") as handle:
             json.dump({"database": mongodb.MONGO_DB_NAME, "run_at": stamp, "counts": counts,
                        "ignored": ignored, "results": results}, handle, indent=1)
+    gaps = [row for row in results if row["missing"]]
+    if gaps:
+        print("metadata not supplied by the files for %d of %d files (left empty):" % (len(gaps), len(results)))
+        for row in gaps[:20]:
+            print("  %s -- %s" % (row["file"], ", ".join(row["missing"])))
     sys.exit(1 if counts.get("failed") else 0)
 
 

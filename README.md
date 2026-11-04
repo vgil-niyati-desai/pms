@@ -207,6 +207,7 @@ frontend/
 scripts/              standalone operator tools, not part of the app
   llmthing_ocr.py       optional OCR helper for scanned certificates (see SETUP.md)
   build_company_package.py  builds an import package for company documents
+  build_tender_package.py   builds an import package of tender bids and their documents
   google_drive_readonly.py  read-only Drive metadata listing
   pdf_splitter/         splits a combined PDF using an Excel index
 SETUP.md              detailed reference

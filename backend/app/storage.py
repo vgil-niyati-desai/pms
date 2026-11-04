@@ -13,13 +13,27 @@ import unicodedata
 import uuid
 from typing import Optional
 
+from dotenv import load_dotenv
 from fastapi import HTTPException
+
+# Same call mongodb.py makes, so a script that imports only this module still
+# sees backend/.env. Real environment variables win over the file.
+load_dotenv()
 
 # uvicorn's own error logger, as main.py uses, so a warning from here lands
 # in the same console in the same format as everything else the server says.
 logger = logging.getLogger("uvicorn.error")
 
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
+# Where uploaded files live. Unset (local development), it is app/uploads next
+# to this file. A deployment sets PMS_UPLOAD_DIR to an absolute path on a
+# persistent volume, so the code checkout and the documents can be backed up,
+# replaced and permissioned separately. Records keep only the bare stored
+# file name, so the same records work from either location.
+_DEFAULT_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
+_configured_upload_dir = os.getenv("PMS_UPLOAD_DIR", "").strip()
+if _configured_upload_dir and not os.path.isabs(_configured_upload_dir):
+    raise RuntimeError("PMS_UPLOAD_DIR must be an absolute path.")
+UPLOAD_DIR = os.path.abspath(_configured_upload_dir) if _configured_upload_dir else _DEFAULT_UPLOAD_DIR
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}

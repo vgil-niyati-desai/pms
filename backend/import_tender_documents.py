@@ -27,13 +27,34 @@ It writes the same shapes the application itself writes:
   with `tender_id` set and the document listed in the tender's `document_ids`.
 
 Per tender it reports *created* or *existing* (matched on issuing authority
-and reference number; an existing tender is never changed). Per document it
+and reference number -- or, for a bid with no reference number, on issuing
+authority and title; an existing tender is never changed). Per document it
 reports *inserted*, *linked* (the file was already in the log, free of any
 other owner, and is now attached), *skipped* (already attached to this
 tender, or already owned by something else, which is left as it is) or
 *failed* (missing file, hash mismatch, unsupported type, over the upload
 limit). Nothing is deleted or overwritten. A report is written to
 PACKAGE_DIR/reports/.
+
+The application's own upload rules (PDF/PNG/JPG, 20 MB) are the default here
+too. A bulk load of bid files that legitimately break them is opt-in, per run:
+
+    --max-mb 250           raise the size limit for this run
+    --allow-ext docx,xlsx  also accept these types (only docx and xlsx)
+
+    --update               refresh records this tool created from the manifest
+
+--update fills in and corrects what the manifest states: on a matched tender it
+sets every non-empty manifest field that differs (and adds missing tags); on a
+matched document it does the same for type, category, reference, date, notes,
+client, title and value -- but only for documents this tool imported
+(submitted_by "import"). A value the manifest leaves out is never cleared. Use
+it before people have edited the records, because it overwrites their values
+for the fields the manifest names. Every change is listed in the report.
+
+A document entry may carry `extraction` ({methods, pages:[{page, method, text}]})
+-- text read from a scan -- which is stored with a newly inserted record as
+`extracted_text`, so an OCR result travels with the document it came from.
 """
 
 import argparse
@@ -47,6 +68,8 @@ from pydantic import ValidationError
 from pymongo.errors import DuplicateKeyError
 
 from app import mongodb, schemas, storage
+
+EXTRA_EXTENSIONS_ALLOWED = {"docx", "xlsx"}
 
 
 def _now():
@@ -70,7 +93,31 @@ def _clean(value):
     return value or None
 
 
-def import_manifest(package_dir, tenders, documents, dry_run=False):
+def _extraction_text(extraction):
+    if not extraction:
+        return None
+    return "\n\n".join(
+        "[page %d]\n%s" % (p["page"], p["text"]) for p in extraction.get("pages", []) if p.get("text")
+    ) or None
+
+
+def _tender_changes(existing, payload):
+    """Fields a manifest sets that the stored tender lacks or has differently."""
+    wanted = payload.model_dump()
+    changes = {k: wanted[k] for k in schemas.TenderFields.model_fields
+               if k != "tags" and wanted.get(k) not in (None, "") and existing.get(k) != wanted[k]}
+    tags = list(existing.get("tags") or [])
+    added = [t for t in wanted.get("tags") or [] if t not in tags]
+    if added:
+        changes["tags"] = tags + added
+    return changes
+
+
+def _document_changes(record, wanted):
+    return {k: v for k, v in wanted.items() if v not in (None, "") and record.get(k) != v}
+
+
+def import_manifest(package_dir, tenders, documents, dry_run=False, max_bytes=None, extra_ext=(), update=False):
     with open(os.path.join(package_dir, "manifest.json"), "r", encoding="utf-8") as handle:
         manifest = json.load(handle)
     results = []
@@ -92,9 +139,23 @@ def import_manifest(package_dir, tenders, documents, dry_run=False):
             existing = tenders.find_one(
                 {"reference_number": payload.reference_number, "issuing_authority": payload.issuing_authority}
             )
+        elif payload.issuing_authority and payload.title:
+            # No reference number to match on: the same authority and title, and
+            # no reference recorded on the existing tender either.
+            existing = tenders.find_one(
+                {"issuing_authority": payload.issuing_authority, "title": payload.title,
+                 "$or": [{"reference_number": None}, {"reference_number": ""}]}
+            )
         if existing is not None:
             tender_id, tender = existing["_id"], existing
-            log("tender", "existing", label, "left unchanged")
+            changes = _tender_changes(existing, payload) if update else {}
+            if changes:
+                if not dry_run:
+                    tenders.update_one({"_id": tender_id}, {"$set": {**changes, "updated_at": _now()}})
+                tender = {**existing, **changes}
+                log("tender", "updated", label, "fields: " + ", ".join(sorted(changes)))
+            else:
+                log("tender", "existing", label, "nothing to update" if update else "left unchanged")
         else:
             now = _now()
             tender = payload.model_dump()
@@ -124,7 +185,23 @@ def import_manifest(package_dir, tenders, documents, dry_run=False):
             if found is not None:
                 fid = str(found["_id"])
                 if tender_id is not None and fid in (tender.get("document_ids") or []):
-                    log("document", "skipped", name, "already attached to this tender")
+                    wanted = {"document_type": _clean(item.get("document_type")), "category": _clean(item.get("category")),
+                              "reference_number": _clean(item.get("reference_number")),
+                              "document_date": _clean(item.get("document_date")), "notes": _clean(item.get("notes")),
+                              "client_name": tender.get("issuing_authority"), "project_title": tender.get("title"),
+                              "contract_value": tender.get("estimated_value")}
+                    changes = _document_changes(found, wanted) if update and found.get("submitted_by") == "import" else {}
+                    if changes:
+                        try:
+                            schemas.check_iso_date(changes.get("document_date"), "Document date")
+                        except ValueError as error:
+                            log("document", "failed", name, str(error))
+                            continue
+                        if not dry_run:
+                            documents.update_one({"_id": found["_id"]}, {"$set": changes})
+                        log("document", "updated", name, "fields: " + ", ".join(sorted(changes)))
+                    else:
+                        log("document", "skipped", name, "already attached to this tender")
                     continue
                 owned_elsewhere = any(found.get(k) for k in ("project_id", "employee_id")) or (
                     found.get("tender_id") and found.get("tender_id") != tid
@@ -144,11 +221,13 @@ def import_manifest(package_dir, tenders, documents, dry_run=False):
                 log("document", "inserted", name, "dry run: would insert")
                 continue
             display = storage.safe_display_name(name)
-            if not storage.allowed_file(display):
+            extension = display.rsplit(".", 1)[-1].lower() if "." in display else ""
+            if not (storage.allowed_file(display) or extension in extra_ext):
                 log("document", "failed", name, "file type is not accepted by the PMS")
                 continue
-            if os.path.getsize(path) > storage.MAX_UPLOAD_BYTES:
-                log("document", "failed", name, "larger than the PMS upload limit (%s)" % storage.MAX_UPLOAD_LABEL)
+            limit = max_bytes or storage.MAX_UPLOAD_BYTES
+            if os.path.getsize(path) > limit:
+                log("document", "failed", name, "larger than the upload limit for this run (%.0f MB)" % (limit / 1048576))
                 continue
             with open(path, "rb") as handle:
                 stored = storage.write_upload(handle.read(), display)
@@ -172,6 +251,10 @@ def import_manifest(package_dir, tenders, documents, dry_run=False):
                 "redacted_from_id": None,
                 "created_at": _now(),
             }
+            text = _extraction_text(item.get("extraction"))
+            if text:
+                record["extracted_text"] = text
+                record["extraction_methods"] = (item.get("extraction") or {}).get("methods")
             try:
                 schemas.check_iso_date(record["document_date"], "Document date")
                 new_id = documents.insert_one(record).inserted_id
@@ -195,7 +278,14 @@ def main():
     parser.add_argument("package")
     parser.add_argument("--confirm-db", required=True, help="must equal the database in use")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--max-mb", type=float, help="raise the per-file size limit for this run")
+    parser.add_argument("--update", action="store_true", help="refresh records this tool created from the manifest")
+    parser.add_argument("--allow-ext", default="", help="comma list of extra types to accept (docx, xlsx)")
     args = parser.parse_args()
+    extra_ext = {e.strip().lower().lstrip(".") for e in args.allow_ext.split(",") if e.strip()}
+    if extra_ext - EXTRA_EXTENSIONS_ALLOWED:
+        sys.exit("--allow-ext accepts only: %s" % ", ".join(sorted(EXTRA_EXTENSIONS_ALLOWED)))
+    max_bytes = int(args.max_mb * 1048576) if args.max_mb else None
 
     if args.confirm_db != mongodb.MONGO_DB_NAME:
         sys.exit("Refusing to run: --confirm-db is %r but MONGO_DB_NAME is %r."
@@ -205,7 +295,8 @@ def main():
         sys.exit("Cannot reach MongoDB at %s: %s" % (mongodb.safe_uri(), error))
     print("database: %s / %s%s" % (mongodb.safe_uri(), mongodb.MONGO_DB_NAME, "  (DRY RUN)" if args.dry_run else ""))
     print("uploads : %s" % storage.UPLOAD_DIR)
-    results = import_manifest(args.package, mongodb.get_tenders_collection(), mongodb.get_collection(), args.dry_run)
+    results = import_manifest(args.package, mongodb.get_tenders_collection(), mongodb.get_collection(),
+                              args.dry_run, max_bytes, extra_ext, args.update)
 
     counts = {}
     for row in results:
